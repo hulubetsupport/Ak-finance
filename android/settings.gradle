@@ -1,0 +1,4 @@
+include ':app'
+rootProject.name = "Ak Finance"
+
+apply from: 'capacitor.settings.gradle'

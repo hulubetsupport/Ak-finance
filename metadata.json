@@ -1,0 +1,6 @@
+{
+  "name": "Ak Finance",
+  "description": "Business Payment Desk for automated SMS capture, local offline SQLite queue, and instant server reconciliation for Ethiopian businesses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -16,10 +16,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Node Dependencies
         run: npm install --legacy-peer-deps
@@ -39,6 +39,8 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
 
       - name: Capacitor Sync Android
         run: npx cap sync android
@@ -46,11 +48,12 @@ jobs:
       - name: Build Android Debug APK
         working-directory: android
         run: |
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version 8.5
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
           fi
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

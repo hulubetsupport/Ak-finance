@@ -16,6 +16,18 @@ allprojects {
     }
 }
 
+ext {
+    compileSdkVersion = 34
+    targetSdkVersion = 34
+    minSdkVersion = 23
+    androidxActivityVersion = '1.9.0'
+    androidxAppCompatVersion = '1.7.0'
+    androidxCoordinatorLayoutVersion = '1.2.0'
+    androidxCoreVersion = '1.13.1'
+    androidxFragmentVersion = '1.8.0'
+    androidxWebkitVersion = '1.11.0'
+}
+
 tasks.register('clean', Delete) {
     delete rootProject.buildDir
 }

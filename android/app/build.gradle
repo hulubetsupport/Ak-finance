@@ -3,6 +3,7 @@ apply plugin: 'com.android.application'
 android {
     namespace "com.akfinance.paymentdesk"
     compileSdk rootProject.ext.compileSdkVersion
+
     defaultConfig {
         applicationId "com.akfinance.paymentdesk"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -14,6 +15,7 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
     buildTypes {
         release {
             minifyEnabled false
@@ -24,6 +26,7 @@ android {
             debuggable true
         }
     }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21

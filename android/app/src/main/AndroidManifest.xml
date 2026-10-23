@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.akfinance.paymentdesk">
 
     <!-- SMS Capture Permissions -->
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
@@ -29,7 +30,7 @@
         <!-- Main Activity -->
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
-            android:name=".MainActivity"
+            android:name="com.akfinance.paymentdesk.MainActivity"
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
@@ -43,7 +44,7 @@
 
         <!-- Broadcast Receiver for Incoming Bank SMS -->
         <receiver
-            android:name=".SmsReceiver"
+            android:name="com.akfinance.paymentdesk.SmsReceiver"
             android:permission="android.permission.BROADCAST_SMS"
             android:exported="true">
             <intent-filter android:priority="999">
@@ -53,7 +54,7 @@
 
         <!-- Boot Receiver for Auto-restart after Phone Reboot -->
         <receiver
-            android:name=".BootReceiver"
+            android:name="com.akfinance.paymentdesk.BootReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>
@@ -65,7 +66,7 @@
 
         <!-- Persistent Foreground Service -->
         <service
-            android:name=".SmsForegroundService"
+            android:name="com.akfinance.paymentdesk.SmsForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

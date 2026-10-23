@@ -37,30 +37,17 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Capacitor Sync Android
         run: npx cap sync android
 
-      - name: Show Capacitor and Gradle versions
-        run: |
-          grep '"@capacitor/' package.json || true
-          cat android/gradle/wrapper/gradle-wrapper.properties || true
-          grep -n "com.android.tools.build:gradle" android/build.gradle || true
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build Android Debug APK
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
-          exit ${PIPESTATUS[0]}
-
-      - name: Show Gradle Error Summary
-        if: failure()
-        working-directory: android
-        run: |
-          grep -n -A 15 "What went wrong" build.log || true
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

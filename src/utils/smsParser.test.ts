@@ -2,49 +2,70 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseBankSms } from './smsParser.ts';
 
-test('parses CBE received payment SMS correctly', () => {
-  const sms = 'Dear Customer, your account 1000****4819 has been credited with ETB 8,400.00 on 19-10-2026 22:33:14 by Tadesse Girma with txn id FT2629391038. Your current balance is ETB 142,500.20. Thank you for banking with CBE!';
+test('Test case a: sender 127 transferred -> Telebirr, Sent', () => {
+  const sms = 'You have transferred ETB 500.00 to Abel (0911000000) on 2026-10-24 10:15:00. Transaction number is 10M9933K1. Your current balance is ETB 4,500.00.';
+  const parsed = parseBankSms('127', sms);
+
+  assert.equal(parsed.bank, 'Telebirr');
+  assert.equal(parsed.type, 'sent');
+  assert.equal(parsed.amount, 500);
+  assert.equal(parsed.counterparty, 'Abel');
+  assert.equal(parsed.reference, '10M9933K1');
+  assert.equal(parsed.balance, 4500);
+});
+
+test('Test case b: sender 127 received -> Telebirr, Received', () => {
+  const sms = 'You have received ETB 2,800.00 from Dawit Haile (0912345678) on 2026-10-24 11:20:00. Transaction ID: 10E9944P1. Your current balance is ETB 7,300.00.';
+  const parsed = parseBankSms('127', sms);
+
+  assert.equal(parsed.bank, 'Telebirr');
+  assert.equal(parsed.type, 'received');
+  assert.equal(parsed.amount, 2800);
+  assert.equal(parsed.counterparty, 'Dawit Haile');
+  assert.equal(parsed.reference, '10E9944P1');
+  assert.equal(parsed.balance, 7300);
+});
+
+test('Test case c: sender CBE credited -> CBE, Received', () => {
+  const sms = 'Your Account 1*****4321 has been Credited with ETB 8,400.00 from Meron with txn id FT2630981120. Your current balance is ETB 150,900.20.';
   const parsed = parseBankSms('CBE', sms);
 
   assert.equal(parsed.bank, 'CBE');
   assert.equal(parsed.type, 'received');
   assert.equal(parsed.amount, 8400);
-  assert.equal(parsed.counterparty, 'Tadesse Girma');
-  assert.equal(parsed.reference, 'FT2629391038');
-  assert.equal(parsed.currency, 'ETB');
-  assert.equal(parsed.balance, 142500.20);
+  assert.equal(parsed.counterparty, 'Meron');
+  assert.equal(parsed.reference, 'FT2630981120');
+  assert.equal(parsed.balance, 150900.20);
 });
 
-test('parses CBE sent / debited SMS correctly', () => {
-  const sms = 'Dear Customer, your account 1000****4819 has been debited with ETB 3,300.00 on 19-10-2026 21:10:02 to Alemayehu Mengistu with txn id FT2629390012. Your current balance is ETB 139,200.20.';
-  const parsed = parseBankSms('127', sms);
+test('Test case d: sender CBE debited -> CBE, Sent', () => {
+  const sms = 'Your Account 1*****4321 has been Debited with ETB 4,200.00 to Addis Supplier with txn id FT2630971100. Your current balance is ETB 146,700.20.';
+  const parsed = parseBankSms('CBE', sms);
 
   assert.equal(parsed.bank, 'CBE');
   assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.amount, 3300);
-  assert.equal(parsed.counterparty, 'Alemayehu Mengistu');
-  assert.equal(parsed.reference, 'FT2629390012');
-  assert.equal(parsed.currency, 'ETB');
+  assert.equal(parsed.amount, 4200);
+  assert.equal(parsed.counterparty, 'Addis Supplier');
+  assert.equal(parsed.reference, 'FT2630971100');
+  assert.equal(parsed.balance, 146700.20);
 });
 
-test('parses Telebirr received SMS correctly', () => {
-  const sms = 'You have received ETB 1,500.00 from Abebe Kebede (0911223344) on 2026-10-19 18:20:10. Transaction ID: 10A8829F2. Your current balance is ETB 15,200.00.';
-  const parsed = parseBankSms('Telebirr', sms);
-
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'received');
-  assert.equal(parsed.amount, 1500);
-  assert.equal(parsed.counterparty, 'Abebe Kebede');
-  assert.equal(parsed.reference, '10A8829F2');
-});
-
-test('parses Awash bank SMS correctly', () => {
-  const sms = 'Awash Bank: Your account 0132****3321 has been credited with ETB 12,000.00 on 19/10/2026 14:15:00 from Binyam Worku with ref FT991002. Balance is ETB 85,000.00.';
+test('Awash Bank credited -> Awash Bank, Received', () => {
+  const sms = 'Awash Bank: Your account 0132****3321 has been credited with ETB 15,000.00 on 22/10/2026 14:10:00 from Yohannes Girma with ref FT993102AW. Balance is ETB 79,120.50.';
   const parsed = parseBankSms('AwashBank', sms);
 
   assert.equal(parsed.bank, 'Awash Bank');
   assert.equal(parsed.type, 'received');
-  assert.equal(parsed.amount, 12000);
-  assert.equal(parsed.counterparty, 'Binyam Worku');
-  assert.equal(parsed.reference, 'FT991002');
+  assert.equal(parsed.amount, 15000);
+  assert.equal(parsed.counterparty, 'Yohannes Girma');
+  assert.equal(parsed.reference, 'FT993102AW');
+  assert.equal(parsed.balance, 79120.50);
+});
+
+test('Unknown direction does not default to received', () => {
+  const sms = 'Notice: Your statement has been prepared. Please visit your branch.';
+  const parsed = parseBankSms('CBE', sms);
+
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'unknown');
 });

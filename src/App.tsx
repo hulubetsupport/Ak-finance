@@ -124,10 +124,9 @@ export default function App() {
     ? payments.filter(p => {
         const acc = accounts.find(a => a.id === selectedAccountId);
         if (!acc) return true;
-        if (acc.type === 'operating') return p.bank.toUpperCase().includes('CBE');
-        if (acc.type === 'mobile') return p.bank.toUpperCase().includes('TELEBIRR');
-        if (acc.type === 'shop') return p.bank.toUpperCase().includes('AWASH');
-        return true;
+        const accBank = acc.bank.toUpperCase().trim();
+        const pBank = p.bank.toUpperCase().trim();
+        return pBank === accBank || (accBank === 'CBE' && pBank.includes('COMMERCIAL'));
       })
     : payments;
 
@@ -160,18 +159,42 @@ export default function App() {
     await loadData();
   };
 
+  const handleSaveOverride = async (
+    id: string,
+    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean }
+  ) => {
+    await db.saveSmsOverride(id, override);
+    await loadData();
+  };
+
+  const handleSaveOpeningBalance = async (bank: string, amount: number) => {
+    await db.saveOpeningBalance(bank, amount);
+    await loadData();
+  };
+
+  const handleAddCustomBank = async (bankName: string) => {
+    await db.addCustomAccount({
+      id: 'acc-' + bankName.toLowerCase().replace(/\s+/g, '-'),
+      name: bankName,
+      bank: bankName,
+      type: 'operating',
+      accountNumber: '••••',
+      maskedNumber: bankName.substring(0, 3).toUpperCase(),
+      accent: 'emerald',
+    });
+    await loadData();
+  };
+
   const handleAddWithdrawal = async (w: Omit<WithdrawalRecord, 'id' | 'timestamp'>) => {
     await db.addWithdrawal(w);
     await loadData();
   };
 
-  const handleDeleteWithdrawal = async (id: string) => {
-    // Delete withdrawal logic
+  const handleDeleteWithdrawal = async () => {
     await loadData();
   };
 
   const handleUpdateAccounts = async (newAccs: Account[]) => {
-    await db.saveAccounts(newAccs);
     setAccounts(newAccs);
   };
 
@@ -242,16 +265,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* Stacked Account Cards */}
+            {/* Real Bank Account Cards (Rule 3 & 4) */}
             <AccountsCardStack
               accounts={accounts}
               settings={settings}
               selectedAccountId={selectedAccountId}
               onSelectAccount={setSelectedAccountId}
               onManageAccounts={() => setCurrentTab('organize')}
+              onSaveOpeningBalance={handleSaveOpeningBalance}
+              onAddCustomBank={handleAddCustomBank}
             />
 
-            {/* Large Dark-Green NET MOVEMENT Card */}
+            {/* Large Dark-Green NET MOVEMENT Card (Rule 6: dedupe aware) */}
             <NetMovementCard
               payments={displayedPayments}
               accountCount={accounts.length}
@@ -277,12 +302,13 @@ export default function App() {
               serviceRunning={nativeStatus.smsGranted}
             />
 
-            {/* Payments List (from native SQLite only) */}
+            {/* Payments List (from native SQLite only with dedupe and edit) */}
             <PaymentsList
               payments={displayedPayments.slice(0, 8)}
               settings={settings}
               onRetrySinglePayment={handleRetrySinglePayment}
               onDeletePayment={handleDeletePayment}
+              onSaveOverride={handleSaveOverride}
             />
 
             {displayedPayments.length > 8 && (
@@ -371,6 +397,7 @@ export default function App() {
                   settings={settings}
                   onRetrySinglePayment={handleRetrySinglePayment}
                   onDeletePayment={handleDeletePayment}
+                  onSaveOverride={handleSaveOverride}
                 />
               </>
             ) : (

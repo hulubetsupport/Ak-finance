@@ -21,8 +21,9 @@ export const NetMovementCard: React.FC<NetMovementCardProps> = ({
   onNextMonth,
   onToggleHideBalances,
 }) => {
-  const receivedList = payments.filter(p => p.type === 'received');
-  const sentList = payments.filter(p => p.type === 'sent');
+  const validPayments = payments.filter(p => !p.isDuplicate && !p.isHidden);
+  const receivedList = validPayments.filter(p => p.type === 'received');
+  const sentList = validPayments.filter(p => p.type === 'sent');
 
   const totalReceived = receivedList.reduce((acc, p) => acc + (p.amount || 0), 0);
   const totalSent = sentList.reduce((acc, p) => acc + (p.amount || 0), 0);

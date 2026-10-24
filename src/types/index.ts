@@ -1,8 +1,21 @@
 export type SyncStatus = 'sent' | 'pending' | 'failed' | 'local';
 
-export type PaymentType = 'received' | 'sent';
+export type PaymentType = 'received' | 'sent' | 'unknown';
 
-export type BankName = 'CBE' | 'Telebirr' | 'Awash Bank' | 'Dashen Bank' | 'Bank of Abyssinia' | 'Coop Bank' | 'Hibret Bank' | string;
+export type BankName = 
+  | 'Telebirr'
+  | 'CBE'
+  | 'Commercial Bank of Ethiopia'
+  | 'Awash Bank'
+  | 'Dashen Bank'
+  | 'Bank of Abyssinia'
+  | 'Abay Bank'
+  | 'Wegagen Bank'
+  | 'Nib Bank'
+  | 'Zemen Bank'
+  | 'Coop Bank'
+  | 'Hibret Bank'
+  | string;
 
 export interface PaymentRecord {
   id: string;
@@ -15,6 +28,7 @@ export interface PaymentRecord {
   reference: string;
   accountNumber?: string;
   balance?: number;
+  extractedBalance?: number;
   rawMessage: string;
   timestamp: number;
   date: string;
@@ -24,6 +38,10 @@ export interface PaymentRecord {
   errorMessage?: string;
   serverResponse?: string;
   source: 'sms' | 'manual' | 'simulated';
+  isDuplicate?: boolean;
+  note?: string;
+  isHidden?: boolean;
+  isOverridden?: boolean;
 }
 
 export interface Account {
@@ -34,7 +52,12 @@ export interface Account {
   accountNumber: string;
   maskedNumber: string;
   balance: number;
-  accent: 'blue' | 'indigo' | 'gold' | 'emerald';
+  accent: 'blue' | 'indigo' | 'gold' | 'emerald' | 'amber' | 'cyan' | 'purple' | 'red';
+  brandColor?: string;
+  receivedThisMonth?: number;
+  sentThisMonth?: number;
+  openingBalance?: number;
+  hasSyncedBalance?: boolean;
 }
 
 export interface WithdrawalRecord {

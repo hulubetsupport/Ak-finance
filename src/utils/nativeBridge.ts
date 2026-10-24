@@ -261,3 +261,149 @@ export const clearAllNativeMessages = async (): Promise<boolean> => {
     return false;
   }
 };
+
+export interface SmsOverride {
+  counterparty: string | null;
+  direction: 'received' | 'sent' | 'unknown' | null;
+  note: string;
+  isHidden: boolean;
+}
+
+export type SmsOverridesMap = Record<string, SmsOverride>;
+export type OpeningBalancesMap = Record<string, number>;
+export type SenderBankMap = Record<string, string>;
+
+export const getNativeOpeningBalances = async (): Promise<OpeningBalancesMap> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getOpeningBalances) {
+    try {
+      const raw = (window as any).AndroidBridge.getOpeningBalances();
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      console.warn('Failed reading opening balances:', e);
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem('ak_opening_balances_sim');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+};
+
+export const saveNativeOpeningBalance = async (bank: string, amount: number): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveOpeningBalance) {
+    return !!(window as any).AndroidBridge.saveOpeningBalance(bank, amount);
+  }
+
+  try {
+    const current = await getNativeOpeningBalances();
+    current[bank] = amount;
+    localStorage.setItem('ak_opening_balances_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const getNativeSmsOverrides = async (): Promise<SmsOverridesMap> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getSmsOverrides) {
+    try {
+      const raw = (window as any).AndroidBridge.getSmsOverrides();
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      console.warn('Failed reading sms overrides:', e);
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem('ak_sms_overrides_sim');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+};
+
+export const saveNativeSmsOverride = async (
+  smsId: number,
+  counterparty: string | null,
+  direction: string | null,
+  note: string,
+  isHidden: boolean
+): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverride) {
+    return !!(window as any).AndroidBridge.saveSmsOverride(smsId, counterparty, direction, note, isHidden);
+  }
+
+  try {
+    const current = await getNativeSmsOverrides();
+    current[String(smsId)] = {
+      counterparty,
+      direction: direction as any,
+      note,
+      isHidden,
+    };
+    localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const getNativeSenderBankMap = async (): Promise<SenderBankMap> => {
+  const defaults: SenderBankMap = {
+    '127': 'Telebirr',
+    'CBE': 'Commercial Bank of Ethiopia',
+    'AwashBank': 'Awash Bank',
+    'Awash': 'Awash Bank',
+    'Dashen': 'Dashen Bank',
+    'BOA': 'Bank of Abyssinia',
+    'Abyssinia': 'Bank of Abyssinia',
+  };
+
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getSenderBankMap) {
+    try {
+      const raw = (window as any).AndroidBridge.getSenderBankMap();
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (parsed && Object.keys(parsed).length > 0) {
+        return { ...defaults, ...parsed };
+      }
+    } catch (e) {
+      console.warn('Failed reading sender bank map:', e);
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem('ak_sender_bank_map_sim');
+    if (raw) return { ...defaults, ...JSON.parse(raw) };
+  } catch {}
+  return defaults;
+};
+
+export const saveNativeSenderBankMap = async (sender: string, bankName: string): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSenderBankMap) {
+    return !!(window as any).AndroidBridge.saveSenderBankMap(sender, bankName);
+  }
+
+  try {
+    const current = await getNativeSenderBankMap();
+    current[sender] = bankName;
+    localStorage.setItem('ak_sender_bank_map_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const deleteNativeSenderBankMap = async (sender: string): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.deleteSenderBankMap) {
+    return !!(window as any).AndroidBridge.deleteSenderBankMap(sender);
+  }
+
+  try {
+    const current = await getNativeSenderBankMap();
+    delete current[sender];
+    localStorage.setItem('ak_sender_bank_map_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};

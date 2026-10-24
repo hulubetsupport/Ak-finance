@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { PaymentRecord, AppSettings } from '../types/index.ts';
+import { PaymentRecord, AppSettings, PaymentType } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
 import { 
   CheckCircle2, 
@@ -8,9 +8,15 @@ import {
   HardDrive, 
   Copy, 
   RefreshCw, 
-  X,
-  CreditCard,
-  Check
+  X, 
+  CreditCard, 
+  Check, 
+  Edit3, 
+  EyeOff, 
+  AlertTriangle,
+  ArrowDownLeft,
+  ArrowUpRight,
+  HelpCircle
 } from 'lucide-react';
 
 interface PaymentsListProps {
@@ -18,23 +24,35 @@ interface PaymentsListProps {
   settings: AppSettings;
   onRetrySinglePayment: (payment: PaymentRecord) => Promise<void>;
   onDeletePayment?: (id: string) => Promise<void>;
+  onSaveOverride?: (
+    paymentId: string,
+    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean }
+  ) => Promise<void>;
 }
 
 export const PaymentsList: React.FC<PaymentsListProps> = ({
   payments,
   settings,
   onRetrySinglePayment,
+  onSaveOverride,
 }) => {
   const [selectedPayment, setSelectedPayment] = useState<PaymentRecord | null>(null);
   const [copied, setCopied] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
+  // Edit modal state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editCounterparty, setEditCounterparty] = useState('');
+  const [editDirection, setEditDirection] = useState<PaymentType>('unknown');
+  const [editNote, setEditNote] = useState('');
+  const [savingOverride, setSavingOverride] = useState(false);
+
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
 
-  const formatAmountCompact = (num: number, type: 'received' | 'sent') => {
+  const formatAmountCompact = (num: number, type: PaymentType) => {
     if (settings.hideBalances) return '••••';
-    const sign = type === 'received' ? '+' : '-';
+    const sign = type === 'received' ? '+' : type === 'sent' ? '-' : '';
     let valStr = '';
     if (num >= 1000) {
       valStr = (num / 1000).toFixed(1) + 'K';
@@ -56,39 +74,44 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
   const getBankBadge = (bank: string) => {
     const b = (bank || '').toUpperCase();
-    if (b.includes('CBE') || b === '127') {
+    if (b.includes('TELEBIRR') || b === '127') {
+      return { text: 'TLB', bg: 'bg-sky-100 text-sky-900 border-sky-200' };
+    }
+    if (b.includes('CBE') || b.includes('COMMERCIAL')) {
       return { text: 'CBE', bg: 'bg-purple-100 text-purple-900 border-purple-200' };
     }
-    if (b.includes('TELEBIRR')) {
-      return { text: 'Telebirr', bg: 'bg-sky-100 text-sky-900 border-sky-200' };
-    }
     if (b.includes('AWASH')) {
-      return { text: 'Awash', bg: 'bg-amber-100 text-amber-900 border-amber-200' };
+      return { text: 'AWA', bg: 'bg-amber-100 text-amber-900 border-amber-200' };
     }
     if (b.includes('DASHEN')) {
-      return { text: 'Dashen', bg: 'bg-blue-100 text-blue-900 border-blue-200' };
+      return { text: 'DSH', bg: 'bg-blue-100 text-blue-900 border-blue-200' };
     }
     if (b.includes('BOA') || b.includes('ABYSSINIA')) {
-      return { text: 'BOA', bg: 'bg-rose-100 text-rose-900 border-rose-200' };
+      return { text: 'BOA', bg: 'bg-yellow-100 text-yellow-900 border-yellow-200' };
+    }
+    if (b.includes('ABAY')) {
+      return { text: 'ABY', bg: 'bg-emerald-100 text-emerald-900 border-emerald-200' };
+    }
+    if (b.includes('WEGAGEN')) {
+      return { text: 'WGG', bg: 'bg-orange-100 text-orange-900 border-orange-200' };
     }
     return {
-      text: (bank || 'SMS').substring(0, 6),
-      bg: 'bg-emerald-100 text-emerald-900 border-emerald-200',
+      text: (bank || 'SMS').substring(0, 3).toUpperCase(),
+      bg: 'bg-slate-100 text-slate-800 border-slate-200',
     };
   };
 
-  // Payment row dot: green sent, amber pending, red failed
   const getStatusDot = (status: PaymentRecord['syncStatus']) => {
     switch (status) {
       case 'sent':
-        return <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-xs" title="Sent (HTTP 200)" />;
+        return <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-xs shrink-0" title="Sent (HTTP 200)" />;
       case 'pending':
-        return <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shadow-xs" title="Pending" />;
+        return <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shadow-xs shrink-0" title="Pending" />;
       case 'failed':
-        return <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-xs" title="Failed" />;
+        return <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-xs shrink-0" title="Failed" />;
       case 'local':
       default:
-        return <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shadow-xs" title="Local SQLite" />;
+        return <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shadow-xs shrink-0" title="Local SQLite" />;
     }
   };
 
@@ -138,9 +161,56 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     setRetryingId(null);
   };
 
+  const openPaymentModal = (payment: PaymentRecord) => {
+    setSelectedPayment(payment);
+    setIsEditing(false);
+    setEditCounterparty(payment.counterparty || '');
+    setEditDirection(payment.type);
+    setEditNote(payment.note || '');
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedPayment || !onSaveOverride) return;
+    setSavingOverride(true);
+    try {
+      await onSaveOverride(selectedPayment.id, {
+        counterparty: editCounterparty.trim(),
+        direction: editDirection,
+        note: editNote.trim(),
+        isHidden: false,
+      });
+      setSelectedPayment(prev => prev ? {
+        ...prev,
+        counterparty: editCounterparty.trim(),
+        type: editDirection,
+        note: editNote.trim(),
+        isOverridden: true,
+      } : null);
+      setIsEditing(false);
+    } finally {
+      setSavingOverride(false);
+    }
+  };
+
+  const handleHidePayment = async () => {
+    if (!selectedPayment || !onSaveOverride) return;
+    const confirmMsg = isAm
+      ? 'ይህ መልዕክት ከክፍያ ዝርዝር ውስጥ እንዲደበቅ ይፈልጋሉ? (የማስታወቂያ ወይም ሌላ SMS)'
+      : 'Hide this message from payments list? (Use for non-payment or promotional SMS)';
+    if (window.confirm(confirmMsg)) {
+      setSavingOverride(true);
+      try {
+        await onSaveOverride(selectedPayment.id, { isHidden: true });
+        setSelectedPayment(null);
+      } finally {
+        setSavingOverride(false);
+      }
+    }
+  };
+
   return (
     <div className="space-y-2.5">
-      {/* Header bar */}
+      {/* Header */}
       <div className="flex items-center justify-between px-1">
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-slate-800 uppercase tracking-wider font-['Poppins',sans-serif]">
@@ -163,27 +233,26 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         </div>
       )}
 
-      {/* List of Payments */}
+      {/* Payment List */}
       <div className="space-y-2">
         {payments.map(item => {
           const bankBadge = getBankBadge(item.bank);
           const isReceived = item.type === 'received';
+          const isSent = item.type === 'sent';
+          const isUnknown = item.type === 'unknown';
           const hasParsedAmount = item.amount > 0;
 
           return (
             <div
               key={item.id}
-              onClick={() => setSelectedPayment(item)}
+              onClick={() => openPaymentModal(item)}
               className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs hover:border-[#14503F]/30 hover:shadow-sm transition-all duration-150 cursor-pointer active:scale-[0.99] flex items-center justify-between gap-3 group"
             >
-              {/* Left Column: Status Dot + Bank badge & Counterparty */}
+              {/* Left Column: Status Dot + Bank Badge & Counterparty */}
               <div className="flex items-center gap-2.5 min-w-0">
-                {/* Payment row dot: green sent, amber pending, red failed */}
-                <div className="shrink-0 pl-0.5">
-                  {getStatusDot(item.syncStatus)}
-                </div>
+                {getStatusDot(item.syncStatus)}
 
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border font-extrabold text-[10px] ${bankBadge.bg}`}>
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border font-black text-[10.5px] ${bankBadge.bg}`}>
                   <span>{bankBadge.text}</span>
                 </div>
 
@@ -192,6 +261,20 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     <span className="text-xs font-bold text-slate-900 truncate font-['Poppins',sans-serif]">
                       {item.counterparty || item.senderAddress}
                     </span>
+
+                    {/* Dedupe Badge (Rule 6) */}
+                    {item.isDuplicate && (
+                      <span className="inline-flex items-center text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded-md">
+                        Duplicate Ref
+                      </span>
+                    )}
+
+                    {/* Edited Badge (Rule 5) */}
+                    {item.isOverridden && (
+                      <span className="inline-flex items-center text-[9px] font-bold bg-purple-50 text-purple-700 border border-purple-200 px-1 py-0.2 rounded-md">
+                        Edited
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1 text-[11px] text-slate-500 mt-0.5 truncate">
@@ -200,29 +283,36 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     <span>{formatDateTime(item.timestamp)}</span>
                   </div>
 
-                  {/* If parsing was unable to extract an amount, show raw preview snippet */}
                   {!hasParsedAmount && (
-                    <p className="text-[10px] text-slate-400 truncate max-w-xs mt-0.5">
+                    <p className="text-[10px] text-slate-400 truncate max-w-xs mt-0.5 font-mono">
                       {item.rawMessage}
                     </p>
                   )}
                 </div>
               </div>
 
-              {/* Right Column: Amount + Status */}
+              {/* Right Column: Amount + Direction / Status */}
               <div className="text-right shrink-0">
                 {hasParsedAmount ? (
                   <div className={`text-sm font-extrabold font-['Poppins',sans-serif] ${
-                    isReceived ? 'text-emerald-700' : 'text-slate-900'
+                    isReceived ? 'text-emerald-700' : isSent ? 'text-slate-900' : 'text-amber-700'
                   }`}>
                     {formatAmountCompact(item.amount, item.type)}{' '}
                     <span className="text-[10px] font-semibold">
-                      {isReceived ? (isAm ? 'ገቢ' : 'Received') : (isAm ? 'ወጪ' : 'Sent')}
+                      {isReceived ? (isAm ? 'ገቢ' : 'Received') : isSent ? (isAm ? 'ወጪ' : 'Sent') : ''}
                     </span>
                   </div>
                 ) : (
                   <div className="text-xs font-mono font-bold text-slate-500">
                     RAW SMS
+                  </div>
+                )}
+
+                {/* If Direction is unknown, prompt user clearly */}
+                {isUnknown && (
+                  <div className="mt-0.5 inline-flex items-center gap-0.5 text-[9.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-200">
+                    <AlertTriangle size={10} />
+                    <span>{isAm ? 'አልታወቀም' : 'Unknown Direction'}</span>
                   </div>
                 )}
 
@@ -235,21 +325,21 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         })}
       </div>
 
-      {/* Payment Detail Modal: Raw SMS, error, [Retry] */}
+      {/* Payment Detail & Edit Modal */}
       {selectedPayment && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${getBankBadge(selectedPayment.bank).bg}`}>
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs ${getBankBadge(selectedPayment.bank).bg}`}>
                   {getBankBadge(selectedPayment.bank).text}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                    {selectedPayment.type === 'received' ? 'Incoming Payment' : 'Outgoing Transfer'}
+                    {selectedPayment.bank} · {selectedPayment.type === 'received' ? 'Received' : selectedPayment.type === 'sent' ? 'Sent' : 'Unknown'}
                   </h3>
                   <span className="text-[11px] text-slate-400">
-                    From: {selectedPayment.senderAddress}
+                    Sender: {selectedPayment.senderAddress} {selectedPayment.reference ? `· Ref: ${selectedPayment.reference}` : ''}
                   </span>
                 </div>
               </div>
@@ -261,51 +351,176 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
               </button>
             </div>
 
-            {/* Amount (if parsed) */}
-            {selectedPayment.amount > 0 && (
-              <div className="bg-[#14503F]/5 rounded-2xl p-4 text-center border border-[#14503F]/10">
-                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                  {selectedPayment.type === 'received' ? 'Total Received' : 'Total Sent'}
-                </div>
-                <div className="text-2xl font-extrabold text-[#14503F] mt-1 font-['Poppins',sans-serif]">
-                  {selectedPayment.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB
-                </div>
+            {/* Big Amount & Duplicate Notice */}
+            <div className="bg-[#14503F]/5 rounded-2xl p-4 text-center border border-[#14503F]/10 space-y-1">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                {selectedPayment.type === 'received' ? 'Total Received' : selectedPayment.type === 'sent' ? 'Total Sent' : 'Transaction Amount'}
               </div>
-            )}
-
-            {/* Status & Attempts */}
-            <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Sync Status:</span>
-                <div>{getSyncStatusBadge(selectedPayment.syncStatus)}</div>
+              <div className="text-2xl font-extrabold text-[#14503F] font-['Poppins',sans-serif]">
+                {selectedPayment.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB
               </div>
-
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Tries / Attempts:</span>
-                <span className="font-mono font-bold text-slate-800">{selectedPayment.retryCount}</span>
-              </div>
-
-              {selectedPayment.serverResponse && (
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Server Reply:</span>
-                  <span className="font-mono font-bold text-slate-800">{selectedPayment.serverResponse}</span>
-                </div>
-              )}
-
-              {selectedPayment.errorMessage && (
-                <div className="pt-1 border-t border-slate-200">
-                  <span className="text-rose-600 font-semibold block mb-0.5">Sync Error:</span>
-                  <p className="font-mono text-[11px] text-rose-700 bg-rose-50 p-2 rounded-lg border border-rose-200 break-all">
-                    {selectedPayment.errorMessage}
-                  </p>
+              {selectedPayment.isDuplicate && (
+                <div className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
+                  <AlertTriangle size={12} />
+                  <span>Duplicate Ref (Excluded from total balances)</span>
                 </div>
               )}
             </div>
 
-            {/* RAW SMS Body with Copy Button */}
+            {/* Edit Transaction Section (Rule 5) */}
+            {isEditing ? (
+              <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+                    {isAm ? 'ክፍያውን ያስተካክሉ' : 'Edit Transaction Info'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditing(false)}
+                    className="text-xs text-slate-500 hover:text-slate-800"
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {/* Counterparty name */}
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-700">Counterparty Name</label>
+                  <input
+                    type="text"
+                    value={editCounterparty}
+                    onChange={e => setEditCounterparty(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F]"
+                    placeholder="Customer / Merchant Name"
+                  />
+                </div>
+
+                {/* Direction Buttons */}
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-700">Direction</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditDirection('received')}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
+                        editDirection === 'received'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      <ArrowDownLeft size={13} />
+                      <span>Received</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setEditDirection('sent')}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
+                        editDirection === 'sent'
+                          ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      <ArrowUpRight size={13} />
+                      <span>Sent</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setEditDirection('unknown')}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
+                        editDirection === 'unknown'
+                          ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      <HelpCircle size={13} />
+                      <span>Unknown</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Note / Reason */}
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-700">Note / Reason</label>
+                  <input
+                    type="text"
+                    value={editNote}
+                    onChange={e => setEditNote(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-[#14503F]"
+                    placeholder="e.g. Shop sales, supplier payout"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSaveEdit}
+                  disabled={savingOverride}
+                  className="w-full py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-sm hover:bg-[#0e3b2e] flex items-center justify-center gap-1.5"
+                >
+                  <Check size={14} />
+                  <span>{savingOverride ? 'Saving to SQLite...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            ) : (
+              <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Counterparty:</span>
+                  <span className="font-bold text-slate-900">{selectedPayment.counterparty}</span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Direction:</span>
+                  <span className={`font-bold capitalize ${
+                    selectedPayment.type === 'received' ? 'text-emerald-700' : selectedPayment.type === 'sent' ? 'text-slate-900' : 'text-amber-700'
+                  }`}>
+                    {selectedPayment.type}
+                  </span>
+                </div>
+
+                {selectedPayment.balance !== undefined && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">SMS Stated Balance:</span>
+                    <span className="font-mono font-bold text-slate-800">
+                      ETB {selectedPayment.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                )}
+
+                {selectedPayment.note && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Note:</span>
+                    <span className="font-medium text-slate-800">{selectedPayment.note}</span>
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-200 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditing(true)}
+                    className="flex-1 py-1.5 px-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center justify-center gap-1"
+                  >
+                    <Edit3 size={12} />
+                    <span>Edit Name / Direction</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleHidePayment}
+                    className="py-1.5 px-2.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1"
+                    title="Hide promotional or non-payment SMS"
+                  >
+                    <EyeOff size={12} />
+                    <span>Not a payment</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* RAW SMS Body (Never Changed) */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-800">Raw SMS Text:</span>
+                <span className="text-xs font-bold text-slate-800">Raw Bank SMS:</span>
                 <button
                   type="button"
                   onClick={() => handleCopy(selectedPayment.rawMessage)}
@@ -320,7 +535,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
               </div>
             </div>
 
-            {/* Actions: Retry button if failed or pending */}
+            {/* Bottom Actions */}
             <div className="pt-2 flex items-center gap-2">
               <button
                 type="button"

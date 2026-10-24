@@ -294,5 +294,105 @@ public class MainActivity extends BridgeActivity {
                 return false;
             }
         }
+
+        @JavascriptInterface
+        public String getOpeningBalances() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getReadableDatabase();
+                Cursor q = db.rawQuery("SELECT bank, amount FROM opening_balances", null);
+                JSONObject obj = new JSONObject();
+                while (q.moveToNext()) {
+                    obj.put(q.getString(0), q.getDouble(1));
+                }
+                q.close();
+                return obj.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean saveOpeningBalance(String bank, double amount) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.execSQL("INSERT OR REPLACE INTO opening_balances (bank, amount, updated_at) VALUES (?, ?, ?)",
+                        new Object[]{bank, amount, System.currentTimeMillis()});
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String getSmsOverrides() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getReadableDatabase();
+                Cursor q = db.rawQuery("SELECT sms_id, counterparty, direction, note, is_hidden FROM sms_overrides", null);
+                JSONObject obj = new JSONObject();
+                while (q.moveToNext()) {
+                    long id = q.getLong(0);
+                    JSONObject row = new JSONObject();
+                    row.put("counterparty", q.isNull(1) ? JSONObject.NULL : q.getString(1));
+                    row.put("direction", q.isNull(2) ? JSONObject.NULL : q.getString(2));
+                    row.put("note", q.isNull(3) ? "" : q.getString(3));
+                    row.put("isHidden", q.getInt(4) == 1);
+                    obj.put(String.valueOf(id), row);
+                }
+                q.close();
+                return obj.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean saveSmsOverride(long smsId, String counterparty, String direction, String note, boolean isHidden) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.execSQL("INSERT OR REPLACE INTO sms_overrides (sms_id, counterparty, direction, note, is_hidden, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        new Object[]{smsId, counterparty, direction, note, isHidden ? 1 : 0, System.currentTimeMillis()});
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String getSenderBankMap() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getReadableDatabase();
+                Cursor q = db.rawQuery("SELECT sender, bank_name FROM sender_bank_map", null);
+                JSONObject obj = new JSONObject();
+                while (q.moveToNext()) {
+                    obj.put(q.getString(0), q.getString(1));
+                }
+                q.close();
+                return obj.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean saveSenderBankMap(String sender, String bankName) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.execSQL("INSERT OR REPLACE INTO sender_bank_map (sender, bank_name) VALUES (?, ?)",
+                        new Object[]{sender, bankName});
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean deleteSenderBankMap(String sender) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                return db.delete("sender_bank_map", "sender=?", new String[]{sender}) > 0;
+            } catch (Exception e) {
+                return false;
+            }
+        }
     }
 }

@@ -7,11 +7,14 @@ import {
   ShieldCheck, 
   AlertTriangle, 
   Radio, 
-  RotateCcw, 
   Download, 
   Trash2,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Plus,
+  X,
+  HelpCircle,
+  Building2
 } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
@@ -31,6 +34,20 @@ interface SettingsTabProps {
   onTriggerSyncAll: () => Promise<void>;
 }
 
+const COMMON_BANKS = [
+  'Telebirr',
+  'Commercial Bank of Ethiopia',
+  'Awash Bank',
+  'Dashen Bank',
+  'Bank of Abyssinia',
+  'Abay Bank',
+  'Wegagen Bank',
+  'Nib Bank',
+  'Zemen Bank',
+  'Coop Bank',
+  'Hibret Bank',
+];
+
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   settings,
   onUpdateSettings,
@@ -42,26 +59,29 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [formData, setFormData] = useState({
     serverUrl: settings.serverUrl,
     secretKey: settings.secretKey,
-    monitoredSenders: settings.allowedSenders.join(', '),
     mode: settings.mode,
     httpMethod: settings.httpMethod || 'GET',
     retryIntervalSeconds: settings.retryIntervalSeconds || 15,
   });
 
+  const [senderBankMap, setSenderBankMap] = useState<Record<string, string>>({});
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [permissions, setPermissions] = useState<{ smsGranted: boolean; notificationsGranted: boolean }>({
     smsGranted: true,
     notificationsGranted: true,
   });
-  const [nativeStatus, setNativeStatus] = useState<NativeStatus | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [clearedNotice, setClearedNotice] = useState(false);
+
+  // Add Sender Modal state
+  const [showAddSenderModal, setShowAddSenderModal] = useState(false);
+  const [newSenderCode, setNewSenderCode] = useState('');
+  const [newSenderBank, setNewSenderBank] = useState('Telebirr');
 
   useEffect(() => {
     setFormData({
       serverUrl: settings.serverUrl,
       secretKey: settings.secretKey,
-      monitoredSenders: settings.allowedSenders.join(', '),
       mode: settings.mode,
       httpMethod: settings.httpMethod || 'GET',
       retryIntervalSeconds: settings.retryIntervalSeconds || 15,
@@ -70,18 +90,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     const refreshInfo = async () => {
       const p = await checkNativePermissions();
       setPermissions(p);
-      const s = await getNativeStatus();
-      setNativeStatus(s);
+      const sMap = await db.getSenderBankMap();
+      setSenderBankMap(sMap);
     };
     refreshInfo();
   }, [settings]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const sendersList = formData.monitoredSenders
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const sendersList = Object.keys(senderBankMap);
 
     await onUpdateSettings({
       serverUrl: formData.serverUrl.trim(),
@@ -94,6 +111,29 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);
+  };
+
+  const handleAddSender = async () => {
+    const code = newSenderCode.trim();
+    if (!code) return;
+    await db.saveSenderBankMapping(code, newSenderBank);
+    const updatedMap = await db.getSenderBankMap();
+    setSenderBankMap(updatedMap);
+
+    const sendersList = Object.keys(updatedMap);
+    await onUpdateSettings({ allowedSenders: sendersList });
+
+    setNewSenderCode('');
+    setShowAddSenderModal(false);
+  };
+
+  const handleDeleteSender = async (senderCode: string) => {
+    await db.deleteSenderBankMapping(senderCode);
+    const updatedMap = await db.getSenderBankMap();
+    setSenderBankMap(updatedMap);
+
+    const sendersList = Object.keys(updatedMap);
+    await onUpdateSettings({ allowedSenders: sendersList });
   };
 
   const handleClearAll = async () => {
@@ -122,7 +162,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   return (
     <div className="space-y-4 pb-24">
-      {/* Header */}
+      {/* Title */}
       <div>
         <h2 className="text-lg font-extrabold text-slate-900 font-['Poppins',sans-serif]">
           {t.settings}
@@ -179,7 +219,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </div>
         </div>
 
-        {/* ONLY IF SMS permission is not granted: Android 13+ Restricted Settings Guide */}
         {!permissions.smsGranted && (
           <div className="bg-amber-50 border border-amber-300/80 rounded-2xl p-3.5 space-y-2 mt-2">
             <div className="flex items-start gap-2 text-amber-900">
@@ -189,18 +228,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   {isAm ? 'አንድሮይድ 13+ ፍቃድ አሰጣጥ መመሪያ' : 'Android 13+ Permission Guide'}
                 </p>
                 <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
-                  {isAm ? (
-                    <>
-                      1. ከታች ያለውን <b>"Open App Info"</b> ይጫኑ<br />
-                      2. ከላይ በቀኝ በኩል የሚታየውን <b>3 ነጥቦች (⋮)</b> ይንኩ<br />
-                      3. <b>"Allow restricted settings"</b> የሚለውን ይምረጡ<br />
-                      4. የስልክ መቆለፊያ ፒን/የጣት አሻራ ያረጋግጡና የ SMS ፍቃድ ይስጡ
-                    </>
-                  ) : (
-                    <>
-                      Open App info (ACTION_APPLICATION_DETAILS_SETTINGS) → ⋮ top right → <b>"Allow restricted settings"</b> → confirm screen lock → grant SMS permission.
-                    </>
-                  )}
+                  Open App info (ACTION_APPLICATION_DETAILS_SETTINGS) → ⋮ top right → <b>"Allow restricted settings"</b> → confirm screen lock → grant SMS permission.
                 </p>
               </div>
             </div>
@@ -217,7 +245,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         )}
       </div>
 
-      {/* Main 4 Visible Settings Form */}
+      {/* Main Settings Form */}
       <form onSubmit={handleSave} className="space-y-3.5">
         <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3.5">
           {/* 1. Server URL */}
@@ -248,25 +276,59 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               type="text"
               value={formData.secretKey}
               onChange={e => setFormData({ ...formData, secretKey: e.target.value })}
-              className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#14503F] focus:ring-1 focus:ring-[#14503F]"
+              className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#14503F]"
               placeholder="ak_secret_key_..."
             />
           </div>
 
-          {/* 3. Monitored Senders */}
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-800 font-['Poppins',sans-serif]">
-              {isAm ? 'የሚነበቡ የባንክ ስሞች (Monitored Senders)' : 'Monitored Senders'}
-            </label>
-            <input
-              type="text"
-              value={formData.monitoredSenders}
-              onChange={e => setFormData({ ...formData, monitoredSenders: e.target.value })}
-              className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#14503F] focus:ring-1 focus:ring-[#14503F]"
-              placeholder="CBE, 127, AwashBank, Dashen, BOA"
-            />
+          {/* 3. SENDER → BANK MAP (Rule 1) */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-800 font-['Poppins',sans-serif]">
+                {isAm ? 'የሚነበቡ የባንክ ስሞች (Monitored Senders)' : 'Monitored Senders → Bank Map'}
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowAddSenderModal(true)}
+                className="text-xs font-bold text-[#14503F] hover:underline flex items-center gap-1"
+              >
+                <Plus size={13} />
+                <span>{isAm ? 'ላኪ ጨምር' : 'Add Sender'}</span>
+              </button>
+            </div>
+
+            {/* Configured Sender Chips */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {Object.entries(senderBankMap).map(([senderCode, bankName]) => (
+                <div
+                  key={senderCode}
+                  className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 flex items-center justify-between"
+                >
+                  <div className="min-w-0">
+                    <span className="font-mono font-bold text-xs text-slate-900 block truncate">
+                      {senderCode} · {bankName}
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      {senderCode === '127' ? 'Telebirr SMS Sender ID' : 'Bank SMS Sender'}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteSender(senderCode)}
+                    className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-slate-200/60 transition-colors shrink-0 ml-1"
+                    title="Remove sender"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
             <p className="text-[10px] text-slate-400">
-              {isAm ? 'በኮማ የተለዩ የላኪ ስሞች (default: CBE, 127, AwashBank, Dashen, BOA)' : 'Comma-separated exact senders (case-insensitive)'}
+              {isAm 
+                ? 'ባንኩ የሚለየው በመጀመሪያ ከላኪው (Sender) ነው፤ ካልታወቀ ብቻ ከ SMS ጽሑፉ ይገመታል' 
+                : 'Bank is decided from SENDER first (e.g. 127 → Telebirr). Only if unknown, guessed from text.'}
             </p>
           </div>
 
@@ -313,14 +375,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           </div>
 
-          {/* Optional / Collapsible: Advanced Network Options (Method & Interval) */}
+          {/* Collapsible: Advanced Protocol Options */}
           <div className="pt-2 border-t border-slate-100">
             <button
               type="button"
               onClick={() => setShowAdvanced(!showAdvanced)}
               className="flex items-center justify-between w-full text-xs font-bold text-slate-600 hover:text-slate-900"
             >
-              <span>Network Protocol Options (Method: {formData.httpMethod}, Interval: {formData.retryIntervalSeconds}s)</span>
+              <span>Protocol Options (Method: {formData.httpMethod}, Interval: {formData.retryIntervalSeconds}s)</span>
               {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
 
@@ -362,7 +424,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           {saveSuccess ? (
             <>
               <Check size={16} className="text-emerald-300" />
-              <span>{isAm ? 'ቅንብሮች በ SharedPreferences "ejeta" ተመዝግበዋል!' : 'Saved to SharedPreferences "ejeta"!'}</span>
+              <span>Saved to SharedPreferences "ejeta"!</span>
             </>
           ) : (
             <>
@@ -398,6 +460,76 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Add Sender Dialog ("Which bank is this?") */}
+      {showAddSenderModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
+                Add Monitored Sender
+              </h3>
+              <button
+                onClick={() => setShowAddSenderModal(false)}
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-800">
+                Sender ID / Address
+              </label>
+              <input
+                type="text"
+                autoFocus
+                value={newSenderCode}
+                onChange={e => setNewSenderCode(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono font-bold focus:outline-none focus:border-[#14503F]"
+                placeholder="e.g. 127, CBE, AwashBank"
+              />
+              <p className="text-[10px] text-slate-400">
+                For Telebirr, the sender is 127.
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-800 flex items-center gap-1">
+                <Building2 size={13} className="text-[#14503F]" />
+                <span>Which bank is this?</span>
+              </label>
+              <select
+                value={newSenderBank}
+                onChange={e => setNewSenderBank(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F]"
+              >
+                {COMMON_BANKS.map(b => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleAddSender}
+                disabled={!newSenderCode.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e] disabled:opacity-50"
+              >
+                Add Sender Mapping
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAddSenderModal(false)}
+                className="py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-100 text-slate-700 text-xs font-bold"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

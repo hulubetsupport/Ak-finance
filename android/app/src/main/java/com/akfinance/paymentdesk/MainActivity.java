@@ -1,10 +1,15 @@
 package com.akfinance.paymentdesk;
 
 import android.Manifest;
+import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
+import android.webkit.JavascriptInterface;
+import android.widget.Toast;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
@@ -17,6 +22,76 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         requestRequiredPermissions();
         startForegroundSyncService();
+        setupJavascriptBridge();
+    }
+
+    private void setupJavascriptBridge() {
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            getBridge().getWebView().addJavascriptInterface(new AndroidNativeBridge(this), "AndroidBridge");
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        setupJavascriptBridge();
+    }
+
+    public static class AndroidNativeBridge {
+        private final Activity activity;
+
+        public AndroidNativeBridge(Activity activity) {
+            this.activity = activity;
+        }
+
+        @JavascriptInterface
+        public void openAppSettings() {
+            try {
+                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.fromParts("package", activity.getPackageName(), null));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(intent);
+            } catch (Exception e) {
+                try {
+                    Intent fallback = new Intent(Settings.ACTION_SETTINGS);
+                    fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(fallback);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        @JavascriptInterface
+        public void openBatterySettings() {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(intent);
+                }
+            } catch (Exception e) {
+                openAppSettings();
+            }
+        }
+
+        @JavascriptInterface
+        public void restartForegroundService() {
+            try {
+                Intent serviceIntent = new Intent(activity, SmsForegroundService.class);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    activity.startForegroundService(serviceIntent);
+                } else {
+                    activity.startService(serviceIntent);
+                }
+                activity.runOnUiThread(() -> 
+                    Toast.makeText(activity, "Ak Finance 24/7 background service active", Toast.LENGTH_SHORT).show()
+                );
+            } catch (Exception ignored) {}
+        }
+
+        @JavascriptInterface
+        public boolean isNative() {
+            return true;
+        }
     }
 
     private void requestRequiredPermissions() {
@@ -59,7 +134,6 @@ public class MainActivity extends BridgeActivity {
     }
 
     public void dispatchSmsToWebview(String sender, String message) {
-        // Sanitize string for JS injection
         String safeSender = sender.replace("'", "\\'");
         String safeMsg = message.replace("'", "\\'").replace("\n", "\\n").replace("\r", "");
 

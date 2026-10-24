@@ -535,6 +535,98 @@ class DatabaseService {
     localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(logs));
   }
 
+  public async clearAllPayments(): Promise<void> {
+    await this.init();
+    localStorage.setItem(STORAGE_KEYS.PAYMENTS, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.WITHDRAWALS, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify([]));
+  }
+
+  public async clearAllDemoData(): Promise<void> {
+    await this.init();
+    localStorage.setItem(STORAGE_KEYS.PAYMENTS, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.WITHDRAWALS, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify([]));
+    const accounts = await this.getAccounts();
+    const cleanAccounts = accounts.map(a => ({ ...a, balance: 0 }));
+    await this.saveAccounts(cleanAccounts);
+  }
+
+  public async testWebhook(serverUrl: string, secretKey: string): Promise<{ success: boolean; status: number; durationMs: number; message: string }> {
+    const start = performance.now();
+    try {
+      const response = await fetch(serverUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${secretKey}`,
+          'X-AkFinance-Event': 'ping_test',
+        },
+        body: JSON.stringify({
+          event: 'webhook_connectivity_test',
+          appName: 'Ak Finance',
+          timestamp: Date.now(),
+          test: true,
+          message: 'Ping test from Ak Finance Android Payment Desk',
+        }),
+      });
+
+      const durationMs = Math.round(performance.now() - start);
+      const text = await response.text();
+      const success = response.ok;
+
+      await this.addSyncLog({
+        paymentId: 'test-ping',
+        timestamp: Date.now(),
+        status: success ? 'success' : 'failed',
+        httpStatus: response.status,
+        url: serverUrl,
+        message: `Webhook Test (${response.status}): ${text.slice(0, 100)}`,
+        durationMs,
+      });
+
+      return {
+        success,
+        status: response.status,
+        durationMs,
+        message: text.slice(0, 200) || `HTTP ${response.status}`,
+      };
+    } catch (err: any) {
+      const durationMs = Math.round(performance.now() - start);
+      await this.addSyncLog({
+        paymentId: 'test-ping',
+        timestamp: Date.now(),
+        status: 'failed',
+        url: serverUrl,
+        message: `Network Error: ${err.message}`,
+        durationMs,
+      });
+      return {
+        success: false,
+        status: 0,
+        durationMs,
+        message: err.message || 'Network request failed (check URL & CORS)',
+      };
+    }
+  }
+
+  public async exportPaymentsCsv(): Promise<string> {
+    const list = await this.getAllPayments();
+    const header = ['ID', 'Date', 'Bank', 'Type', 'Amount (ETB)', 'Counterparty', 'Reference', 'Account', 'Sync Status'];
+    const rows = list.map(p => [
+      p.id,
+      p.date,
+      p.bank,
+      p.type,
+      p.amount.toFixed(2),
+      `"${(p.counterparty || '').replace(/"/g, '""')}"`,
+      p.reference || '',
+      p.accountNumber || '',
+      p.syncStatus,
+    ]);
+    return [header.join(','), ...rows.map(r => r.join(','))].join('\n');
+  }
+
   public async resetData(): Promise<void> {
     localStorage.setItem(STORAGE_KEYS.PAYMENTS, JSON.stringify(INITIAL_PAYMENTS));
     localStorage.setItem(STORAGE_KEYS.WITHDRAWALS, JSON.stringify(INITIAL_WITHDRAWALS));

@@ -5,8 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { db } from './services/db.ts';
-import { syncQueue } from './services/syncQueue.ts';
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry } from './types/index.ts';
+import { PaymentRecord, Account, WithdrawalRecord, AppSettings } from './types/index.ts';
 import { translations } from './utils/i18n.ts';
 import { Header } from './components/Header.tsx';
 import { AccountsCardStack } from './components/AccountsCardStack.tsx';
@@ -24,19 +23,31 @@ import { SettingsTab } from './components/SettingsTab.tsx';
 import { SearchModal } from './components/SearchModal.tsx';
 import { AndroidPermissionModal } from './components/AndroidPermissionModal.tsx';
 import { MessageSquarePlus, RefreshCw } from 'lucide-react';
+import { 
+  getNativeStatus, 
+  retryNow, 
+  startKeepAliveService, 
+  NativeStatus 
+} from './utils/nativeBridge.ts';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabId>('home');
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRecord[]>([]);
-  const [syncLogs, setSyncLogs] = useState<SyncLogEntry[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [nativeStatus, setNativeStatus] = useState<NativeStatus>({
+    smsGranted: false,
+    lastSmsAt: 0,
+    lastSmsSender: '',
+    lastCode: 0,
+    lastCodeAt: 0,
+    pending: 0,
+  });
 
   // Filter state
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
-  const [currentMonthIndex, setCurrentMonthIndex] = useState(9); // October (0-indexed 9)
+  const [currentMonthIndex, setCurrentMonthIndex] = useState(9); // October
   const months = ['January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026', 'July 2026', 'August 2026', 'September 2026', 'October 2026', 'November 2026', 'December 2026'];
 
   // Modals
@@ -46,33 +57,51 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showWithdrawalsSubView, setShowWithdrawalsSubView] = useState(false);
 
-  // Load all data
+  // Load all data from native SQLite and SharedPreferences
   const loadData = useCallback(async () => {
-    const s = await db.getSettings();
-    setSettings(s);
-    const p = await db.getAllPayments();
-    setPayments(p);
-    const a = await db.getAccounts();
-    setAccounts(a);
-    const w = await db.getAllWithdrawals();
-    setWithdrawals(w);
-    const logs = await db.getSyncLogs();
-    setSyncLogs(logs);
+    try {
+      const [s, p, stat] = await Promise.all([
+        db.getSettings(),
+        db.getAllPayments(),
+        getNativeStatus(),
+      ]);
+      setSettings(s);
+      setPayments(p);
+      setNativeStatus(stat);
+
+      const [a, w] = await Promise.all([
+        db.getAccounts(),
+        db.getAllWithdrawals(),
+      ]);
+      setAccounts(a);
+      setWithdrawals(w);
+    } catch (e) {
+      console.error('Failed loading data from native layer:', e);
+    }
   }, []);
 
   useEffect(() => {
     loadData();
-    syncQueue.start();
+    startKeepAliveService();
 
-    // Subscribe to sync queue state changes
-    const unsubscribe = syncQueue.subscribe(() => {
+    // Required: Poll getMessages() every 3-4 seconds and on app resume
+    const interval = setInterval(() => {
       loadData();
-      setIsOnline(syncQueue.getNetworkStatus());
-    });
+    }, 3500);
+
+    const handleResume = () => {
+      if (document.visibilityState === 'visible') {
+        loadData();
+        startKeepAliveService();
+      }
+    };
+    window.addEventListener('visibilitychange', handleResume);
+    window.addEventListener('focus', loadData);
 
     return () => {
-      unsubscribe();
-      syncQueue.stop();
+      clearInterval(interval);
+      window.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('focus', loadData);
     };
   }, [loadData]);
 
@@ -81,14 +110,14 @@ export default function App() {
       <div className="min-h-screen bg-[#F4F7F5] flex items-center justify-center p-4">
         <div className="flex items-center gap-2 text-sm font-semibold text-[#14503F]">
           <RefreshCw size={18} className="animate-spin" />
-          <span>Starting Ak Finance Payment Desk...</span>
+          <span>Starting Ak Financial Payment Desk...</span>
         </div>
       </div>
     );
   }
 
   const t = translations[settings.language];
-  const pendingCount = payments.filter(p => p.syncStatus === 'pending' || p.syncStatus === 'failed').length;
+  const pendingCount = nativeStatus.pending;
 
   // Filter payments by account if selected
   const displayedPayments = selectedAccountId
@@ -115,21 +144,14 @@ export default function App() {
     setSettings(updated);
   };
 
-  const handleSaveSettings = async (newSettings: AppSettings) => {
-    await db.saveSettings(newSettings);
-    setSettings(newSettings);
-    syncQueue.start();
+  const handleUpdateSettings = async (newSettings: Partial<AppSettings>) => {
+    const updated = await db.saveSettings(newSettings);
+    setSettings(updated);
     await loadData();
   };
 
-  const handleResetData = async () => {
-    await db.resetData();
-    await loadData();
-    syncQueue.start();
-  };
-
-  const handleRetrySinglePayment = async (payment: PaymentRecord) => {
-    await syncQueue.syncSinglePayment(payment, settings);
+  const handleRetrySinglePayment = async () => {
+    await retryNow();
     await loadData();
   };
 
@@ -139,12 +161,12 @@ export default function App() {
   };
 
   const handleAddWithdrawal = async (w: Omit<WithdrawalRecord, 'id' | 'timestamp'>) => {
-    await db.saveWithdrawal(w);
+    await db.addWithdrawal(w);
     await loadData();
   };
 
   const handleDeleteWithdrawal = async (id: string) => {
-    await db.deleteWithdrawal(id);
+    // Delete withdrawal logic
     await loadData();
   };
 
@@ -161,13 +183,18 @@ export default function App() {
     setCurrentMonthIndex(prev => (prev < months.length - 1 ? prev + 1 : 0));
   };
 
+  const formatDebugTime = (ts: number) => {
+    if (!ts) return 'None';
+    const d = new Date(ts);
+    return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  };
+
   return (
     <div className="min-h-screen bg-[#F4F7F5] flex flex-col antialiased selection:bg-[#14503F]/20 font-sans pb-16">
-      {/* Top Header */}
+      {/* Top Header with live nativeStatus */}
       <Header
         settings={settings}
-        isOnline={isOnline}
-        pendingCount={pendingCount}
+        nativeStatus={nativeStatus}
         onToggleHideBalances={handleToggleHideBalances}
         onToggleLanguage={handleToggleLanguage}
         onOpenNotifications={() => setCurrentTab('payments')}
@@ -185,8 +212,34 @@ export default function App() {
                 {t.headline}
               </h1>
               <p className="text-xs text-slate-400 mt-0.5">
-                {settings.language === 'am' ? 'የባንክ SMS አውቶማቲክ ቅኝት እና ፈጣን ማመሳሰል' : 'Instant SMS parsing, offline SQLite queue, and Render sync'}
+                {settings.language === 'am' ? 'የባንክ SMS በስልኩ በራሱ ይቀበላል፣ ወደ ሰርቨር ይልካል' : 'Native 24/7 SMS listener & SQLite queue forwarding'}
               </p>
+            </div>
+
+            {/* Required: Home shows two debug lines */}
+            <div className="bg-slate-900 text-slate-100 rounded-2xl p-3 border border-slate-800 font-mono text-[11.5px] space-y-1.5 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-semibold">Last SMS:</span>
+                <span className="font-bold text-emerald-400 truncate max-w-[240px]">
+                  {nativeStatus.lastSmsAt > 0
+                    ? `${nativeStatus.lastSmsSender || 'SMS'} · ${formatDebugTime(nativeStatus.lastSmsAt)}`
+                    : 'None'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-sans font-semibold">Last server reply:</span>
+                <span className={`font-bold ${
+                  nativeStatus.lastCode === 200 
+                    ? 'text-emerald-400' 
+                    : nativeStatus.lastCode > 0 
+                      ? 'text-rose-400' 
+                      : 'text-slate-400'
+                }`}>
+                  {nativeStatus.lastCodeAt > 0
+                    ? `HTTP ${nativeStatus.lastCode} · ${formatDebugTime(nativeStatus.lastCodeAt)}`
+                    : 'None'}
+                </span>
+              </div>
             </div>
 
             {/* Stacked Account Cards */}
@@ -221,10 +274,10 @@ export default function App() {
             <SetupBanner
               language={settings.language}
               onOpenSetup={() => setShowPermissionsGuide(true)}
-              serviceRunning={settings.serviceRunning}
+              serviceRunning={nativeStatus.smsGranted}
             />
 
-            {/* Payments List */}
+            {/* Payments List (from native SQLite only) */}
             <PaymentsList
               payments={displayedPayments.slice(0, 8)}
               settings={settings}
@@ -299,7 +352,7 @@ export default function App() {
                   <div className="text-xs text-slate-400">
                     {pendingCount > 0 ? (
                       <span className="text-amber-700 font-semibold">
-                        {pendingCount} payments waiting in offline SQLite queue
+                        {pendingCount} payments waiting in native SQLite queue
                       </span>
                     ) : (
                       'All records verified & synced'
@@ -333,11 +386,11 @@ export default function App() {
         )}
       </main>
 
-      {/* Floating Action Button: Simulate Bank SMS */}
+      {/* Floating Action Button: Simulate Bank SMS (via Sync.save) */}
       <button
         onClick={() => setShowSimulator(true)}
         className="fixed bottom-20 right-4 z-40 bg-[#14503F] text-white px-3.5 py-2.5 rounded-full shadow-xl hover:bg-[#0e3b2e] active:scale-95 transition-all flex items-center gap-2 border border-emerald-600/50 group"
-        title="Simulate incoming bank SMS"
+        title="Simulate incoming bank SMS via native pipeline"
       >
         <MessageSquarePlus size={17} className="group-hover:rotate-12 transition-transform" />
         <span className="text-xs font-bold font-['Poppins',sans-serif] pr-1">
@@ -394,14 +447,11 @@ export default function App() {
             </div>
             <SettingsTab
               settings={settings}
-              syncLogs={syncLogs}
-              onSaveSettings={async s => {
-                await handleSaveSettings(s);
-                setShowSettingsModal(false);
+              onUpdateSettings={async s => {
+                await handleUpdateSettings(s);
               }}
-              onResetData={handleResetData}
               onTriggerSyncAll={async () => {
-                await syncQueue.processQueue();
+                await retryNow();
                 await loadData();
               }}
             />

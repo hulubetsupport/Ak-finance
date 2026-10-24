@@ -1,12 +1,12 @@
 import React from 'react';
 import { Bell, Eye, EyeOff, Globe } from 'lucide-react';
-import { AppSettings, SyncStatus } from '../types/index.ts';
+import { AppSettings } from '../types/index.ts';
+import { NativeStatus } from '../utils/nativeBridge.ts';
 import { translations } from '../utils/i18n.ts';
 
 interface HeaderProps {
   settings: AppSettings;
-  isOnline: boolean;
-  pendingCount: number;
+  nativeStatus: NativeStatus;
   onToggleHideBalances: () => void;
   onToggleLanguage: () => void;
   onOpenNotifications: () => void;
@@ -15,15 +15,18 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   settings,
-  isOnline,
-  pendingCount,
+  nativeStatus,
   onToggleHideBalances,
   onToggleLanguage,
   onOpenNotifications,
   onOpenSettings,
 }) => {
   const t = translations[settings.language];
+  const isAm = settings.language === 'am';
 
+  // Header pill rule:
+  // "Connected" (green) ONLY if smsGranted && url set && pending==0 && lastCode==200;
+  // amber "n pending"; red "Not set up" if permission or URL missing; grey in Local mode.
   const getStatusDisplay = () => {
     if (settings.mode === 'local') {
       return {
@@ -32,24 +35,45 @@ export const Header: React.FC<HeaderProps> = ({
         badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
       };
     }
-    if (!isOnline) {
+
+    const hasUrl = !!settings.serverUrl?.trim();
+    if (!nativeStatus.smsGranted || !hasUrl) {
       return {
-        label: t.offline,
+        label: isAm ? 'አልተዋቀረም' : 'Not set up',
         dotClass: 'bg-rose-500',
         badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
       };
     }
-    if (pendingCount > 0) {
+
+    if (nativeStatus.pending > 0) {
       return {
-        label: `${pendingCount} ${settings.language === 'am' ? 'በመጠባበቅ' : 'pending'}`,
+        label: `${nativeStatus.pending} ${isAm ? 'በመጠባበቅ' : 'pending'}`,
         dotClass: 'bg-amber-500 animate-pulse',
         badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
       };
     }
+
+    if (nativeStatus.smsGranted && hasUrl && nativeStatus.pending === 0 && nativeStatus.lastCode === 200) {
+      return {
+        label: t.connected,
+        dotClass: 'bg-emerald-500',
+        badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200/80',
+      };
+    }
+
+    // Server configured, permissions granted, waiting for first SMS / response
+    if (nativeStatus.lastCode > 0 && nativeStatus.lastCode !== 200) {
+      return {
+        label: `HTTP ${nativeStatus.lastCode}`,
+        dotClass: 'bg-rose-500',
+        badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
+      };
+    }
+
     return {
-      label: t.connected,
-      dotClass: 'bg-emerald-500',
-      badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200/80',
+      label: isAm ? 'ተዘጋጅቷል' : 'Ready',
+      dotClass: 'bg-amber-400',
+      badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
     };
   };
 
@@ -62,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex flex-col cursor-pointer" onClick={onOpenSettings}>
           <div className="flex items-center gap-1.5">
             <span className="font-extrabold text-2xl tracking-tight text-[#14503F] font-['Poppins',sans-serif]">
-              mrkuz
+              Ak Financial
             </span>
             <span className="w-1.5 h-1.5 rounded-full bg-[#14503F] mt-1"></span>
           </div>
@@ -111,7 +135,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="relative w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-600 hover:text-slate-900 shadow-xs transition-all active:scale-95"
           >
             <Bell size={16} />
-            {pendingCount > 0 && (
+            {nativeStatus.pending > 0 && (
               <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-white" />
             )}
           </button>

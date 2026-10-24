@@ -3,60 +3,32 @@ package com.akfinance.paymentdesk;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
-import android.os.Bundle;
+import android.provider.Telephony;
 import android.telephony.SmsMessage;
-import android.util.Log;
 
 public class SmsReceiver extends BroadcastReceiver {
-    private static final String TAG = "AkFinanceSmsReceiver";
-
     @Override
-    public void onReceive(Context context, Intent intent) {
-        if (!"android.provider.Telephony.SMS_RECEIVED".equals(intent.getAction())) {
-            return;
+    public void onReceive(final Context c, Intent i) {
+        if (!"android.provider.Telephony.SMS_RECEIVED".equals(i.getAction())) return;
+        SmsMessage[] ms = Telephony.Sms.Intents.getMessagesFromIntent(i);
+        if (ms == null || ms.length == 0 || ms[0].getOriginatingAddress() == null) return;
+        String sender = ms[0].getOriginatingAddress();
+        if (!Sync.senderOk(c, sender)) return;
+        StringBuilder b = new StringBuilder();
+        for (SmsMessage m : ms) {
+            b.append(m.getMessageBody());
         }
-
-        Bundle bundle = intent.getExtras();
-        if (bundle == null) return;
-
-        try {
-            Object[] pdus = (Object[]) bundle.get("pdus");
-            if (pdus == null || pdus.length == 0) return;
-
-            String format = bundle.getString("format");
-            StringBuilder fullMessage = new StringBuilder();
-            String sender = "";
-
-            for (Object pdu : pdus) {
-                SmsMessage sms;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    sms = SmsMessage.createFromPdu((byte[]) pdu, format);
-                } else {
-                    sms = SmsMessage.createFromPdu((byte[]) pdu);
+        boolean server = Sync.isServer(c);
+        if (!Sync.save(c, sender, b.toString(), System.currentTimeMillis(), server ? "pending" : "local") || !server) return;
+        final PendingResult r = goAsync();
+        new Thread(() -> {
+            try {
+                if (Sync.run(c) > 0) {
+                    Sync.schedule(c);
                 }
-                if (sms != null) {
-                    sender = sms.getDisplayOriginatingAddress();
-                    fullMessage.append(sms.getDisplayMessageBody());
-                }
+            } finally {
+                r.finish();
             }
-
-            Log.d(TAG, "Captured incoming SMS from: " + sender);
-
-            // Forward to Foreground Service for immediate retryable HTTP dispatch & SQLite persistence
-            Intent serviceIntent = new Intent(context, SmsForegroundService.class);
-            serviceIntent.putExtra("ACTION", "NEW_SMS");
-            serviceIntent.putExtra("SENDER", sender);
-            serviceIntent.putExtra("MESSAGE", fullMessage.toString());
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent);
-            } else {
-                context.startService(serviceIntent);
-            }
-
-        } catch (Exception e) {
-            Log.e(TAG, "Error parsing incoming SMS: " + e.getMessage(), e);
-        }
+        }).start();
     }
 }

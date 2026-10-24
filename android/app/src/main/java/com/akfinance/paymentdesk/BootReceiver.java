@@ -3,23 +3,22 @@ package com.akfinance.paymentdesk;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
-import android.util.Log;
+import androidx.core.content.ContextCompat;
 
 public class BootReceiver extends BroadcastReceiver {
-    private static final String TAG = "AkFinanceBootReceiver";
-
     @Override
     public void onReceive(Context context, Intent intent) {
-        String action = intent.getAction();
+        String action = intent != null ? intent.getAction() : null;
         if (Intent.ACTION_BOOT_COMPLETED.equals(action) || "android.intent.action.QUICKBOOT_POWERON".equals(action)) {
-            Log.i(TAG, "Phone reboot detected. Restarting Ak Finance SMS capture service...");
-            Intent serviceIntent = new Intent(context, SmsForegroundService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent);
-            } else {
-                context.startService(serviceIntent);
-            }
+            Intent serviceIntent = new Intent(context, KeepAliveService.class);
+            try {
+                ContextCompat.startForegroundService(context, serviceIntent);
+            } catch (Exception ignored) {}
+            new Thread(() -> {
+                if (Sync.run(context) > 0) {
+                    Sync.schedule(context);
+                }
+            }).start();
         }
     }
 }

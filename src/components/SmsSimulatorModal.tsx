@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X, Send, Smartphone, Sparkles, MessageSquare, Check } from 'lucide-react';
-import { syncQueue } from '../services/syncQueue.ts';
+import { X, Send, Smartphone, Sparkles, Check } from 'lucide-react';
+import { db } from '../services/db.ts';
 import { AppSettings } from '../types/index.ts';
 
 interface SmsSimulatorModalProps {
@@ -55,13 +55,14 @@ export const SmsSimulatorModal: React.FC<SmsSimulatorModalProps> = ({
     if (!message.trim()) return;
     setIsSubmitting(true);
     try {
-      await syncQueue.handleIncomingSms(sender || 'CBE', message.trim(), 'simulated');
+      // Inserts through native Sync.save() and goes through the exact same SQLite + HTTP pipeline
+      await db.insertTestSms(sender || 'CBE', message.trim());
       setSuccessNotice(true);
       onSmsProcessed();
       setTimeout(() => {
         setSuccessNotice(false);
         onClose();
-      }, 1200);
+      }, 1000);
     } finally {
       setIsSubmitting(false);
     }
@@ -78,10 +79,10 @@ export const SmsSimulatorModal: React.FC<SmsSimulatorModalProps> = ({
             </div>
             <div>
               <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                Simulate Bank SMS
+                Send Test Bank SMS
               </h3>
               <p className="text-[11px] text-slate-400">
-                Test parsing & offline queue dispatching
+                Processed via native Sync.save() &amp; SQLite pipeline
               </p>
             </div>
           </div>
@@ -93,21 +94,34 @@ export const SmsSimulatorModal: React.FC<SmsSimulatorModalProps> = ({
           </button>
         </div>
 
-        {/* Quick Template Selector */}
+        {/* Sender Input */}
+        <div className="space-y-1">
+          <label className="text-xs font-bold text-slate-700">Sender Address</label>
+          <input
+            type="text"
+            value={sender}
+            onChange={e => setSender(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono font-medium focus:outline-none focus:border-[#14503F]"
+            placeholder="CBE, 127, Telebirr, AwashBank, Dashen, BOA"
+          />
+        </div>
+
+        {/* Preset Templates */}
         <div className="space-y-1.5">
-          <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
-            Quick Bank Templates
-          </span>
-          <div className="grid grid-cols-2 gap-1.5">
+          <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+            <Sparkles size={13} className="text-amber-500" />
+            <span>Bank SMS Presets</span>
+          </label>
+          <div className="grid grid-cols-1 gap-1.5 max-h-36 overflow-y-auto">
             {SMS_TEMPLATES.map((tpl, i) => (
               <button
                 key={i}
                 type="button"
                 onClick={() => handleSelectTemplate(tpl)}
-                className={`text-left text-[11px] p-2 rounded-xl border transition-colors ${
-                  message === tpl.message
-                    ? 'bg-emerald-50 border-[#14503F] text-[#14503F] font-bold'
-                    : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                className={`p-2 rounded-xl border text-left text-xs transition-all ${
+                  sender === tpl.sender && message === tpl.message
+                    ? 'border-[#14503F] bg-emerald-50 text-[#14503F] font-bold'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
                 }`}
               >
                 {tpl.name}
@@ -116,60 +130,34 @@ export const SmsSimulatorModal: React.FC<SmsSimulatorModalProps> = ({
           </div>
         </div>
 
-        {/* Form fields */}
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              Sender Shortcode / Bank Name
-            </label>
-            <input
-              type="text"
-              value={sender}
-              onChange={e => setSender(e.target.value)}
-              placeholder="e.g. CBE, 127, Telebirr, AwashBank"
-              className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F] font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              SMS Message Body
-            </label>
-            <textarea
-              rows={4}
-              value={message}
-              onChange={e => setMessage(e.target.value)}
-              placeholder="Paste raw SMS text here..."
-              className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F] font-mono leading-relaxed"
-            />
-          </div>
+        {/* Message Body */}
+        <div className="space-y-1">
+          <label className="text-xs font-bold text-slate-700">SMS Body</label>
+          <textarea
+            rows={4}
+            value={message}
+            onChange={e => setMessage(e.target.value)}
+            className="w-full p-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-800 focus:outline-none focus:border-[#14503F]"
+            placeholder="Raw SMS message text..."
+          />
         </div>
 
-        {/* Mode info note */}
-        <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-[11px] text-slate-600 flex items-start gap-2">
-          <Sparkles size={14} className="text-[#14503F] shrink-0 mt-0.5" />
-          <span>
-            {settings.mode === 'server'
-              ? `Server Mode active: Payment will be saved to local SQLite and posted to ${settings.serverUrl}`
-              : 'Local Mode active: Payment will be recorded in local DB without sending network requests.'}
-          </span>
-        </div>
-
-        {/* Trigger Button */}
+        {/* Action Button */}
         <button
+          type="button"
           onClick={handleSend}
           disabled={isSubmitting || !message.trim()}
-          className="w-full py-3 rounded-xl bg-[#14503F] text-white text-xs font-bold flex items-center justify-center gap-2 shadow-md hover:bg-[#0e3b2e] active:scale-98 transition-all disabled:opacity-50"
+          className="w-full py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e] disabled:opacity-50 transition-all flex items-center justify-center gap-2"
         >
           {successNotice ? (
             <>
-              <Check size={16} />
-              <span>Captured & Queued Successfully!</span>
+              <Check size={14} className="text-emerald-300" />
+              <span>Saved to SQLite &amp; Triggered Sync!</span>
             </>
           ) : (
             <>
-              <Send size={15} />
-              <span>{isSubmitting ? 'Parsing & Saving...' : 'Simulate SMS Arrival'}</span>
+              <Send size={14} />
+              <span>{isSubmitting ? 'Saving...' : 'Inject via Sync.save()'}</span>
             </>
           )}
         </button>

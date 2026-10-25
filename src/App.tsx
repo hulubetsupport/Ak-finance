@@ -22,6 +22,13 @@ import { OrganizeTab } from './components/OrganizeTab.tsx';
 import { SettingsTab } from './components/SettingsTab.tsx';
 import { SearchModal } from './components/SearchModal.tsx';
 import { AndroidPermissionModal } from './components/AndroidPermissionModal.tsx';
+import { SecurityLockScreen } from './components/SecurityLockScreen.tsx';
+import { SecuritySettingsModal } from './components/SecuritySettingsModal.tsx';
+import { BackupRestoreModal } from './components/BackupRestoreModal.tsx';
+import { LocalVerifyModal } from './components/LocalVerifyModal.tsx';
+import { AboutModal } from './components/AboutModal.tsx';
+import { HeaderMenu } from './components/HeaderMenu.tsx';
+import { hasPinConfigured } from './utils/security.ts';
 import { MessageSquarePlus, RefreshCw } from 'lucide-react';
 import { 
   getNativeStatus, 
@@ -50,12 +57,20 @@ export default function App() {
   const [currentMonthIndex, setCurrentMonthIndex] = useState(9); // October
   const months = ['January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026', 'July 2026', 'August 2026', 'September 2026', 'October 2026', 'November 2026', 'December 2026'];
 
+  // App Lock State (Rule C2)
+  const [isLocked, setIsLocked] = useState<boolean>(() => hasPinConfigured());
+
   // Modals
   const [showSimulator, setShowSimulator] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showPermissionsGuide, setShowPermissionsGuide] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showWithdrawalsSubView, setShowWithdrawalsSubView] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+  const [showBackupModal, setShowBackupModal] = useState(false);
+  const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [showAboutModal, setShowAboutModal] = useState(false);
 
   // Load all data from native SQLite and SharedPreferences
   const loadData = useCallback(async () => {
@@ -84,26 +99,76 @@ export default function App() {
     loadData();
     startKeepAliveService();
 
-    // Required: Poll getMessages() every 3-4 seconds and on app resume
+    // Required: Poll getMessages() every 3-4 seconds
+    // Bug 1 Fix: Pause polling/refresh while any input, textarea, or select is focused
     const interval = setInterval(() => {
+      if (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+        return;
+      }
       loadData();
     }, 3500);
 
-    const handleResume = () => {
-      if (document.visibilityState === 'visible') {
-        loadData();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        // Lock app on background if PIN configured
+        if (hasPinConfigured()) {
+          setIsLocked(true);
+        }
+      } else if (document.visibilityState === 'visible') {
+        if (!document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+          loadData();
+        }
         startKeepAliveService();
       }
     };
-    window.addEventListener('visibilitychange', handleResume);
-    window.addEventListener('focus', loadData);
+
+    const handleFocus = () => {
+      if (!document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+        loadData();
+      }
+    };
+
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
 
     return () => {
       clearInterval(interval);
-      window.removeEventListener('visibilitychange', handleResume);
-      window.removeEventListener('focus', loadData);
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
     };
   }, [loadData]);
+
+  // Android Back button handling: Closes active modal or returns to Home tab
+  useEffect(() => {
+    const handleAndroidBack = () => {
+      if (showMenu) { setShowMenu(false); return; }
+      if (showSearch) { setShowSearch(false); return; }
+      if (showSettingsModal) { setShowSettingsModal(false); return; }
+      if (showSecurityModal) { setShowSecurityModal(false); return; }
+      if (showBackupModal) { setShowBackupModal(false); return; }
+      if (showVerifyModal) { setShowVerifyModal(false); return; }
+      if (showAboutModal) { setShowAboutModal(false); return; }
+      if (showPermissionsGuide) { setShowPermissionsGuide(false); return; }
+      if (showSimulator) { setShowSimulator(false); return; }
+      if (currentTab !== 'home') { setCurrentTab('home'); return; }
+    };
+
+    window.addEventListener('androidBackPressed', handleAndroidBack);
+    return () => {
+      window.removeEventListener('androidBackPressed', handleAndroidBack);
+    };
+  }, [
+    showMenu,
+    showSearch,
+    showSettingsModal,
+    showSecurityModal,
+    showBackupModal,
+    showVerifyModal,
+    showAboutModal,
+    showPermissionsGuide,
+    showSimulator,
+    currentTab,
+  ]);
 
   if (!settings) {
     return (
@@ -222,6 +287,7 @@ export default function App() {
         onToggleLanguage={handleToggleLanguage}
         onOpenNotifications={() => setCurrentTab('payments')}
         onOpenSettings={() => setShowSettingsModal(true)}
+        onOpenMenu={() => setShowMenu(true)}
       />
 
       {/* Main Container */}
@@ -268,6 +334,7 @@ export default function App() {
             {/* Real Bank Account Cards (Rule 3 & 4) */}
             <AccountsCardStack
               accounts={accounts}
+              payments={payments}
               settings={settings}
               selectedAccountId={selectedAccountId}
               onSelectAccount={setSelectedAccountId}
@@ -484,6 +551,52 @@ export default function App() {
             />
           </div>
         </div>
+      )}
+
+      {/* 3-Dot Header Menu (Rule C1) */}
+      <HeaderMenu
+        isOpen={showMenu}
+        onClose={() => setShowMenu(false)}
+        onOpenSettings={() => setShowSettingsModal(true)}
+        onOpenSecurity={() => setShowSecurityModal(true)}
+        onOpenBackup={() => setShowBackupModal(true)}
+        onOpenVerify={() => setShowVerifyModal(true)}
+        onOpenAbout={() => setShowAboutModal(true)}
+        isPinEnabled={hasPinConfigured()}
+      />
+
+      {/* Security PIN Settings Modal (Rule C2) */}
+      <SecuritySettingsModal
+        isOpen={showSecurityModal}
+        onClose={() => setShowSecurityModal(false)}
+        onSettingsChanged={() => {}}
+      />
+
+      {/* Backup & Restore Modal (Rule C6) */}
+      <BackupRestoreModal
+        isOpen={showBackupModal}
+        onClose={() => setShowBackupModal(false)}
+        onDataRestored={loadData}
+      />
+
+      {/* Local Verify Modal (Rule C5) */}
+      <LocalVerifyModal
+        isOpen={showVerifyModal}
+        onClose={() => setShowVerifyModal(false)}
+        payments={payments}
+      />
+
+      {/* About & Help Modal */}
+      <AboutModal
+        isOpen={showAboutModal}
+        onClose={() => setShowAboutModal(false)}
+      />
+
+      {/* App PIN Lock Screen (Rule C2) */}
+      {isLocked && (
+        <SecurityLockScreen
+          onUnlock={() => setIsLocked(false)}
+        />
       )}
     </div>
   );

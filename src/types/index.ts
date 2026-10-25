@@ -2,6 +2,8 @@ export type SyncStatus = 'sent' | 'pending' | 'failed' | 'local';
 
 export type PaymentType = 'received' | 'sent' | 'unknown';
 
+export type PaymentCategory = 'transfer' | 'airtime' | 'data' | 'bill' | 'cash' | 'other';
+
 export type BankName = 
   | 'Telebirr'
   | 'CBE'
@@ -22,7 +24,11 @@ export interface PaymentRecord {
   senderAddress: string;
   bank: BankName;
   type: PaymentType;
+  category?: PaymentCategory;
   amount: number;
+  amountCents?: number;
+  fee?: number;
+  feeCents?: number;
   currency: string;
   counterparty: string;
   reference: string;
@@ -40,8 +46,31 @@ export interface PaymentRecord {
   source: 'sms' | 'manual' | 'simulated';
   isDuplicate?: boolean;
   note?: string;
+  tag?: string;
   isHidden?: boolean;
   isOverridden?: boolean;
+}
+
+export interface SecuritySettings {
+  pinEnabled: boolean;
+  pinLength: 4 | 6;
+  pinSalt: string;
+  pinHash: string;
+  biometricEnabled: boolean;
+  failedAttempts: number;
+  lockoutUntil: number;
+}
+
+export interface BackupData {
+  version: number;
+  exportedAt: string;
+  app: string;
+  messages: any[];
+  openingBalances: Record<string, number>;
+  overrides: Record<string, any>;
+  senderBankMap: Record<string, string>;
+  counterpartyTags: Record<string, string>;
+  settings: AppSettings;
 }
 
 export interface Account {

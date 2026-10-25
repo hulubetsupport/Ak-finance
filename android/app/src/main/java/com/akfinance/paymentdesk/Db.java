@@ -15,7 +15,7 @@ public class Db extends SQLiteOpenHelper {
     }
 
     Db(Context c) {
-        super(c, "ejeta.db", null, 2);
+        super(c, "ejeta.db", null, 3);
     }
 
     @Override
@@ -23,16 +23,23 @@ public class Db extends SQLiteOpenHelper {
         d.execSQL("CREATE TABLE sms(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, body TEXT, ts INTEGER, status TEXT, tries INTEGER DEFAULT 0, err TEXT, code INTEGER DEFAULT 0)");
         d.execSQL("CREATE TABLE withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, ts INTEGER, note TEXT)");
         d.execSQL("CREATE TABLE IF NOT EXISTS opening_balances(bank TEXT PRIMARY KEY, amount REAL, updated_at INTEGER)");
-        d.execSQL("CREATE TABLE IF NOT EXISTS sms_overrides(sms_id INTEGER PRIMARY KEY, counterparty TEXT, direction TEXT, note TEXT, is_hidden INTEGER DEFAULT 0, updated_at INTEGER)");
+        d.execSQL("CREATE TABLE IF NOT EXISTS sms_overrides(sms_id INTEGER PRIMARY KEY, counterparty TEXT, direction TEXT, note TEXT, is_hidden INTEGER DEFAULT 0, tag TEXT, updated_at INTEGER)");
         d.execSQL("CREATE TABLE IF NOT EXISTS sender_bank_map(sender TEXT PRIMARY KEY, bank_name TEXT)");
+        d.execSQL("CREATE TABLE IF NOT EXISTS counterparty_tags(counterparty TEXT PRIMARY KEY, tag TEXT, updated_at INTEGER)");
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase d, int oldVersion, int newVersion) {
         if (oldVersion < 2) {
             d.execSQL("CREATE TABLE IF NOT EXISTS opening_balances(bank TEXT PRIMARY KEY, amount REAL, updated_at INTEGER)");
-            d.execSQL("CREATE TABLE IF NOT EXISTS sms_overrides(sms_id INTEGER PRIMARY KEY, counterparty TEXT, direction TEXT, note TEXT, is_hidden INTEGER DEFAULT 0, updated_at INTEGER)");
+            d.execSQL("CREATE TABLE IF NOT EXISTS sms_overrides(sms_id INTEGER PRIMARY KEY, counterparty TEXT, direction TEXT, note TEXT, is_hidden INTEGER DEFAULT 0, tag TEXT, updated_at INTEGER)");
             d.execSQL("CREATE TABLE IF NOT EXISTS sender_bank_map(sender TEXT PRIMARY KEY, bank_name TEXT)");
+        }
+        if (oldVersion < 3) {
+            try {
+                d.execSQL("ALTER TABLE sms_overrides ADD COLUMN tag TEXT");
+            } catch (Exception ignored) {}
+            d.execSQL("CREATE TABLE IF NOT EXISTS counterparty_tags(counterparty TEXT PRIMARY KEY, tag TEXT, updated_at INTEGER)");
         }
     }
 }

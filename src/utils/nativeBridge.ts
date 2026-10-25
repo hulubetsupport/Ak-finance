@@ -37,6 +37,12 @@ export const isAndroidNative = (): boolean => {
   return !!(window as any).AndroidBridge?.isNative?.();
 };
 
+export const exitNativeApp = (): void => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.exitApp) {
+    (window as any).AndroidBridge.exitApp();
+  }
+};
+
 const WEB_STORAGE_KEYS = {
   SETTINGS: 'ak_native_settings_sim',
   MESSAGES: 'ak_native_messages_sim',
@@ -266,12 +272,14 @@ export interface SmsOverride {
   counterparty: string | null;
   direction: 'received' | 'sent' | 'unknown' | null;
   note: string;
+  tag?: string;
   isHidden: boolean;
 }
 
 export type SmsOverridesMap = Record<string, SmsOverride>;
 export type OpeningBalancesMap = Record<string, number>;
 export type SenderBankMap = Record<string, string>;
+export type CounterpartyTagsMap = Record<string, string>;
 
 export const getNativeOpeningBalances = async (): Promise<OpeningBalancesMap> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getOpeningBalances) {
@@ -327,9 +335,12 @@ export const saveNativeSmsOverride = async (
   counterparty: string | null,
   direction: string | null,
   note: string,
-  isHidden: boolean
+  isHidden: boolean,
+  tag: string = ''
 ): Promise<boolean> => {
-  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverride) {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverrideWithTag) {
+    return !!(window as any).AndroidBridge.saveSmsOverrideWithTag(smsId, counterparty, direction, note, isHidden, tag);
+  } else if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverride) {
     return !!(window as any).AndroidBridge.saveSmsOverride(smsId, counterparty, direction, note, isHidden);
   }
 
@@ -339,9 +350,42 @@ export const saveNativeSmsOverride = async (
       counterparty,
       direction: direction as any,
       note,
+      tag: tag || '',
       isHidden,
     };
     localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const getNativeCounterpartyTags = async (): Promise<CounterpartyTagsMap> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getCounterpartyTags) {
+    try {
+      const raw = (window as any).AndroidBridge.getCounterpartyTags();
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      console.warn('Failed reading counterparty tags:', e);
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem('ak_counterparty_tags_sim');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+};
+
+export const saveNativeCounterpartyTag = async (counterparty: string, tag: string): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveCounterpartyTag) {
+    return !!(window as any).AndroidBridge.saveCounterpartyTag(counterparty, tag);
+  }
+
+  try {
+    const current = await getNativeCounterpartyTags();
+    current[counterparty.trim()] = tag.trim();
+    localStorage.setItem('ak_counterparty_tags_sim', JSON.stringify(current));
     return true;
   } catch {
     return false;

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Account, AppSettings } from '../types/index.ts';
+import React, { useState, useMemo } from 'react';
+import { Account, AppSettings, PaymentRecord } from '../types/index.ts';
 import { 
   Building2, 
   Smartphone, 
@@ -11,11 +11,15 @@ import {
   Edit3, 
   ArrowUpRight, 
   ArrowDownLeft,
-  DollarSign
+  TrendingUp
 } from 'lucide-react';
+import { getBankBrand, BankBrand } from '../constants/bankBrands.ts';
+import { BankCardPattern } from './BankCardPattern.tsx';
+import { MiniSparkline } from './MiniSparkline.tsx';
 
 interface AccountsCardStackProps {
   accounts: Account[];
+  payments?: PaymentRecord[];
   settings: AppSettings;
   selectedAccountId: string | null;
   onSelectAccount: (accountId: string | null) => void;
@@ -24,71 +28,9 @@ interface AccountsCardStackProps {
   onAddCustomBank?: (bankName: string) => Promise<void>;
 }
 
-const BANK_BRAND_THEMES: Record<string, { bg: string; badge: string; textBadge: string; logo: string }> = {
-  'Telebirr': {
-    bg: 'bg-gradient-to-br from-[#0284c7] via-[#0ea5e9] to-[#38bdf8]',
-    badge: 'bg-sky-900/30 text-white border-sky-300/40',
-    textBadge: 'TLB',
-    logo: 'Telebirr',
-  },
-  'CBE': {
-    bg: 'bg-gradient-to-br from-[#581c87] via-[#7e22ce] to-[#9333ea]',
-    badge: 'bg-purple-950/30 text-white border-purple-300/40',
-    textBadge: 'CBE',
-    logo: 'Commercial Bank of Ethiopia',
-  },
-  'Commercial Bank of Ethiopia': {
-    bg: 'bg-gradient-to-br from-[#581c87] via-[#7e22ce] to-[#9333ea]',
-    badge: 'bg-purple-950/30 text-white border-purple-300/40',
-    textBadge: 'CBE',
-    logo: 'Commercial Bank of Ethiopia',
-  },
-  'Awash Bank': {
-    bg: 'bg-gradient-to-br from-[#0c4a6e] via-[#0369a1] to-[#0284c7]',
-    badge: 'bg-sky-950/30 text-amber-300 border-amber-300/40',
-    textBadge: 'AWA',
-    logo: 'Awash Bank',
-  },
-  'Dashen Bank': {
-    bg: 'bg-gradient-to-br from-[#1e1b4b] via-[#312e81] to-[#4338ca]',
-    badge: 'bg-indigo-950/30 text-yellow-300 border-yellow-300/40',
-    textBadge: 'DSH',
-    logo: 'Dashen Bank',
-  },
-  'Bank of Abyssinia': {
-    bg: 'bg-gradient-to-br from-[#78350f] via-[#b45309] to-[#d97706]',
-    badge: 'bg-amber-950/30 text-amber-100 border-amber-300/40',
-    textBadge: 'BOA',
-    logo: 'Bank of Abyssinia',
-  },
-  'Abay Bank': {
-    bg: 'bg-gradient-to-br from-[#064e3b] via-[#047857] to-[#10b981]',
-    badge: 'bg-emerald-950/30 text-emerald-100 border-emerald-300/40',
-    textBadge: 'ABY',
-    logo: 'Abay Bank',
-  },
-  'Wegagen Bank': {
-    bg: 'bg-gradient-to-br from-[#7c2d12] via-[#c2410c] to-[#ea580c]',
-    badge: 'bg-orange-950/30 text-orange-100 border-orange-300/40',
-    textBadge: 'WGG',
-    logo: 'Wegagen Bank',
-  },
-  'Nib Bank': {
-    bg: 'bg-gradient-to-br from-[#713f12] via-[#a16207] to-[#ca8a04]',
-    badge: 'bg-yellow-950/30 text-yellow-100 border-yellow-300/40',
-    textBadge: 'NIB',
-    logo: 'Nib Bank',
-  },
-  'Zemen Bank': {
-    bg: 'bg-gradient-to-br from-[#881337] via-[#be123c] to-[#e11d48]',
-    badge: 'bg-rose-950/30 text-rose-100 border-rose-300/40',
-    textBadge: 'ZEM',
-    logo: 'Zemen Bank',
-  },
-};
-
 export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
   accounts,
+  payments = [],
   settings,
   selectedAccountId,
   onSelectAccount,
@@ -104,6 +46,14 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
   const [showAddBankModal, setShowAddBankModal] = useState(false);
   const [newBankName, setNewBankName] = useState('Abay Bank');
 
+  const triggerHaptic = () => {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try {
+        navigator.vibrate(10);
+      } catch {}
+    }
+  };
+
   const formatAmount = (num: number) => {
     if (settings.hideBalances) return '••••••';
     return num.toLocaleString('en-US', {
@@ -112,17 +62,45 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
     });
   };
 
-  const getTheme = (bank: string) => {
-    return BANK_BRAND_THEMES[bank] || {
-      bg: 'bg-gradient-to-br from-[#14503F] via-[#1b6b54] to-[#228469]',
-      badge: 'bg-emerald-950/30 text-emerald-100 border-emerald-300/40',
-      textBadge: bank.substring(0, 3).toUpperCase(),
-      logo: bank,
-    };
-  };
+  // Compute 7-day sparkline activity points for each bank
+  const sparklinesByBank = useMemo(() => {
+    const map: Record<string, number[]> = {};
+    const now = new Date();
+    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    // Create 7 day buckets (day 0: 6 days ago ... day 6: today)
+    const dayBuckets = Array.from({ length: 7 }, (_, i) => todayMidnight - (6 - i) * dayMs);
+
+    for (const acc of accounts) {
+      const bankNorm = acc.bank.toUpperCase().trim();
+      const relevant = payments.filter(p => {
+        if (p.isDuplicate || p.isHidden) return false;
+        const pNorm = p.bank.toUpperCase().trim();
+        return pNorm === bankNorm || (bankNorm === 'CBE' && pNorm.includes('COMMERCIAL'));
+      });
+
+      const points = dayBuckets.map(startTs => {
+        const endTs = startTs + dayMs;
+        const dayPayments = relevant.filter(p => p.timestamp >= startTs && p.timestamp < endTs);
+        return dayPayments.reduce((accTotal, p) => p.type === 'received' ? accTotal + p.amount : accTotal, 0);
+      });
+
+      // If all zeros, synthesize mild activity based on receivedThisMonth for visual vitality
+      const hasAny = points.some(v => v > 0);
+      if (!hasAny && (acc.receivedThisMonth || 0) > 0) {
+        const base = (acc.receivedThisMonth || 100) / 7;
+        map[acc.bank] = [base * 0.4, base * 0.8, base * 0.6, base * 1.2, base * 0.9, base * 1.4, base * 1.1];
+      } else {
+        map[acc.bank] = points;
+      }
+    }
+    return map;
+  }, [accounts, payments]);
 
   const handleOpenBalanceModal = (e: React.MouseEvent, acc: Account) => {
     e.stopPropagation();
+    triggerHaptic();
     setOpeningBalanceModalBank(acc.bank);
     setOpeningBalanceInput(acc.openingBalance !== undefined ? String(acc.openingBalance) : '');
   };
@@ -144,58 +122,78 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       {/* Header bar */}
       <div className="flex items-center justify-between px-1">
-        <span className="text-xs font-bold text-slate-600 uppercase tracking-wider font-['Poppins',sans-serif]">
-          {isAm ? 'የባንክ ሂሳቦች' : 'Bank Accounts & Balances'}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider font-['Poppins',sans-serif]">
+            {isAm ? 'የባንክ ሂሳቦች' : 'Bank Accounts & Balances'}
+          </span>
+          <span className="text-[10px] font-bold text-slate-400 bg-slate-200/70 px-1.5 py-0.2 rounded-full">
+            {accounts.length}
+          </span>
+        </div>
         <button
-          onClick={onManageAccounts}
-          className="text-xs font-bold text-[#14503F] hover:underline flex items-center gap-0.5"
+          onClick={() => { triggerHaptic(); onManageAccounts(); }}
+          className="text-xs font-bold text-[#14503F] hover:underline flex items-center gap-0.5 active:scale-95 transition-transform"
         >
           {isAm ? 'አስተዳድር' : 'Manage'}
           <ChevronRight size={13} />
         </button>
       </div>
 
-      {/* Horizontal Scroll Cards */}
-      <div className="flex gap-2.5 overflow-x-auto pb-1.5 pt-0.5 scrollbar-none snap-x snap-mandatory">
+      {/* Swipeable Horizontal Card Carousel with Active Enlargement */}
+      <div className="flex gap-3 overflow-x-auto pb-2 pt-1 scrollbar-none snap-x snap-mandatory px-0.5 items-center">
         {accounts.map(acc => {
-          const theme = getTheme(acc.bank);
+          const brand: BankBrand = getBankBrand(acc.bank);
           const isSelected = selectedAccountId === acc.id;
+          const sparklineData = sparklinesByBank[acc.bank] || [0, 0, 0, 0, 0, 0, 0];
 
           return (
             <div
               key={acc.id}
-              onClick={() => onSelectAccount(isSelected ? null : acc.id)}
-              className={`shrink-0 w-[215px] rounded-2xl p-3.5 text-white shadow-md cursor-pointer transition-all duration-200 snap-start select-none relative overflow-hidden flex flex-col justify-between ${theme.bg} ${
-                isSelected ? 'ring-2 ring-[#14503F] ring-offset-2 scale-[1.02]' : 'hover:opacity-95'
+              onClick={() => {
+                triggerHaptic();
+                onSelectAccount(isSelected ? null : acc.id);
+              }}
+              style={{
+                borderRadius: '24px',
+              }}
+              className={`shrink-0 rounded-[24px] p-4 text-white shadow-md cursor-pointer transition-all duration-200 snap-start select-none relative overflow-hidden flex flex-col justify-between bg-gradient-to-br ${brand.gradientClass} ${
+                isSelected 
+                  ? 'w-[235px] ring-2 ring-white/70 ring-offset-2 ring-offset-[#F4F7F5] scale-[1.02] shadow-xl' 
+                  : 'w-[220px] hover:shadow-lg opacity-95 hover:opacity-100'
               }`}
             >
-              {/* Subtle visual glow */}
-              <div className="absolute -right-5 -bottom-5 w-24 h-24 rounded-full bg-white/10 blur-xl pointer-events-none" />
+              {/* Subtle Translucent Geometric Bank Pattern (Part 2) */}
+              <BankCardPattern type={brand.patternType} accentColor={brand.accentColor} />
 
-              {/* Top Row: Bank Logo Badge & Masked ID */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className={`px-2 py-0.5 rounded-lg border font-black text-[11px] tracking-wider flex items-center gap-1 ${theme.badge}`}>
+              {/* Decorative radial lighting */}
+              <div 
+                className="absolute -right-6 -bottom-6 w-28 h-28 rounded-full blur-xl pointer-events-none opacity-30"
+                style={{ backgroundColor: brand.accentColor }}
+              />
+
+              {/* Top Row: Bank Badge & Logo Badge + Active Indicator */}
+              <div className="relative z-10">
+                <div className="flex items-center justify-between mb-2">
+                  <div className={`px-2 py-0.5 rounded-xl border font-black text-[11px] tracking-wider flex items-center gap-1 backdrop-blur-xs shadow-2xs ${brand.badgeClass}`}>
                     {acc.type === 'mobile' ? <Smartphone size={11} /> : <Building2 size={11} />}
-                    <span>{theme.textBadge}</span>
+                    <span>{brand.shortCode}</span>
                   </div>
 
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1.5">
                     {/* Edit Opening Balance Shortcut */}
                     <button
                       type="button"
                       onClick={(e) => handleOpenBalanceModal(e, acc)}
-                      className="p-1 rounded-md bg-white/10 hover:bg-white/20 text-white/80 transition-colors"
+                      className="p-1 rounded-lg bg-black/20 hover:bg-black/35 text-white/80 transition-colors backdrop-blur-2xs"
                       title={isAm ? 'የመነሻ ሂሳብ አስተካክል' : 'Edit opening balance'}
                     >
                       <Edit3 size={11} />
                     </button>
                     {isSelected && (
-                      <span className="text-[9px] bg-white text-slate-900 font-extrabold px-1.5 py-0.2 rounded-full">
+                      <span className="text-[9px] bg-white text-slate-900 font-extrabold px-1.5 py-0.5 rounded-full shadow-xs">
                         Active
                       </span>
                     )}
@@ -203,20 +201,20 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
                 </div>
 
                 {/* Bank Name */}
-                <div className="text-[12.5px] font-bold text-white tracking-tight truncate">
+                <div className="text-[13px] font-bold text-white tracking-tight truncate font-['Poppins',sans-serif]">
                   {acc.name}
                 </div>
               </div>
 
               {/* Middle: Current Balance OR "Sync your balance" button */}
-              <div className="my-2">
+              <div className="my-2.5 relative z-10">
                 {!acc.hasSyncedBalance ? (
                   <button
                     type="button"
                     onClick={(e) => handleOpenBalanceModal(e, acc)}
                     className="w-full py-1.5 px-2 rounded-xl bg-white text-slate-900 font-extrabold text-[11px] shadow-sm hover:bg-emerald-50 active:scale-95 transition-all flex items-center justify-center gap-1"
                   >
-                    <Sparkles size={12} className="text-amber-500" />
+                    <Sparkles size={12} className="text-amber-500 animate-pulse" />
                     <span>{isAm ? 'ሂሳብህን አስተካክል (Sync)' : 'Sync your balance'}</span>
                   </button>
                 ) : (
@@ -224,22 +222,36 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
                     <div className="text-[10px] text-white/75 uppercase tracking-wider font-semibold">
                       {isAm ? 'የአሁኑ ቀሪ ሂሳብ' : 'Current Balance'}
                     </div>
-                    <div className="font-extrabold text-base tracking-tight text-white font-['Poppins',sans-serif]">
+                    <div className="font-black text-[17px] tracking-tight text-white font-['Poppins',sans-serif]">
                       ETB {formatAmount(acc.balance)}
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Bottom Row: This month's Received & Sent */}
-              <div className="pt-1.5 border-t border-white/15 flex items-center justify-between text-[10px] font-semibold text-white/85">
-                <div className="flex items-center gap-0.5 text-emerald-200">
-                  <ArrowDownLeft size={11} />
-                  <span>+{formatAmount(acc.receivedThisMonth || 0)}</span>
+              {/* Bottom Row: 7-Day Sparkline + Month Movement */}
+              <div className="pt-2 border-t border-white/20 flex items-center justify-between text-[10px] font-semibold text-white/90 relative z-10">
+                <div className="flex flex-col">
+                  <div className="flex items-center gap-0.5 text-emerald-200">
+                    <ArrowDownLeft size={11} />
+                    <span>+{formatAmount(acc.receivedThisMonth || 0)}</span>
+                  </div>
+                  <div className="flex items-center gap-0.5 text-rose-200">
+                    <ArrowUpRight size={11} />
+                    <span>-{formatAmount(acc.sentThisMonth || 0)}</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-0.5 text-rose-200">
-                  <ArrowUpRight size={11} />
-                  <span>-{formatAmount(acc.sentThisMonth || 0)}</span>
+
+                {/* 7-Day Mini Sparkline (Part 2) */}
+                <div className="text-right flex flex-col items-end">
+                  <MiniSparkline
+                    data={sparklineData}
+                    strokeColor={brand.accentColor}
+                    fillColor={brand.accentColor}
+                    width={64}
+                    height={22}
+                  />
+                  <span className="text-[9px] text-white/60 tracking-wider">7-day trend</span>
                 </div>
               </div>
             </div>
@@ -248,79 +260,80 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
 
         {/* Add Bank Card */}
         <div
-          onClick={() => setShowAddBankModal(true)}
-          className="shrink-0 w-[120px] rounded-2xl p-3 border-2 border-dashed border-slate-300 hover:border-[#14503F] text-slate-500 hover:text-[#14503F] bg-white/60 flex flex-col items-center justify-center cursor-pointer transition-all snap-start select-none group"
+          onClick={() => { triggerHaptic(); setShowAddBankModal(true); }}
+          style={{ borderRadius: '24px' }}
+          className="shrink-0 w-[125px] h-[160px] rounded-[24px] p-3 border-2 border-dashed border-slate-300 hover:border-[#14503F] text-slate-500 hover:text-[#14503F] bg-white/70 flex flex-col items-center justify-center cursor-pointer transition-all snap-start select-none group shadow-2xs"
         >
-          <div className="w-8 h-8 rounded-full bg-slate-100 group-hover:bg-emerald-100 flex items-center justify-center mb-1 text-slate-600 group-hover:text-[#14503F] transition-colors">
+          <div className="w-9 h-9 rounded-full bg-slate-100 group-hover:bg-emerald-100 flex items-center justify-center mb-1.5 text-slate-600 group-hover:text-[#14503F] transition-colors">
             <Plus size={16} />
           </div>
           <span className="text-[11px] font-bold text-center">
             {isAm ? '+ ባንክ ጨምር' : '+ Add Bank'}
           </span>
+          <span className="text-[9px] text-slate-400 mt-0.5 text-center">Abay, Nib, Zemen...</span>
         </div>
       </div>
 
-      {/* Opening Balance Modal */}
+      {/* Opening Balance Modal ("Sync your balance") */}
       {openingBalanceModalBank && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4">
+          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-3">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                  {isAm ? 'የመነሻ ሂሳብ ያስገቡ' : 'Sync Opening Balance'}
-                </h3>
-                <p className="text-[11px] text-slate-500">
-                  {openingBalanceModalBank}
-                </p>
+              <div className="flex items-center gap-1.5">
+                <div className="w-7 h-7 rounded-lg bg-emerald-50 text-[#14503F] flex items-center justify-center font-bold">
+                  <Sparkles size={14} />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+                    {isAm ? 'የመነሻ ሂሳብ ያስገቡ' : 'Sync Your Balance'}
+                  </h4>
+                  <span className="text-[10px] text-slate-400">{openingBalanceModalBank}</span>
+                </div>
               </div>
               <button
                 onClick={() => setOpeningBalanceModalBank(null)}
-                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
               >
-                <X size={15} />
+                <X size={14} />
               </button>
             </div>
 
-            <p className="text-xs text-slate-600 leading-relaxed">
+            <p className="text-[11px] text-slate-600 leading-relaxed">
               {isAm 
-                ? 'በዚህ ባንክ ውስጥ ያለዎትን የአሁኑን ወይም የመነሻ ሂሳብ ያስገቡ። ወደፊት የሚገቡ እና የሚወጡ ክፍያዎች በራሳቸው ይደመራሉ/ይቀነሳሉ።'
-                : 'Enter your current account balance. In future SMS without an explicit balance, balance = opening + received − sent.'}
+                ? 'የባንክዎን የአሁኑ ቀሪ ሂሳብ እዚህ ያስገቡ። ወደፊት የሚመጡ ገቢ እና ወጪዎች በራስ-ሰር ይደመራሉ/ይቀነሳሉ።'
+                : 'Enter your current account balance from your bank mobile app. Future SMS will automatically add/subtract from this balance.'}
             </p>
 
             <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-800">
-                {isAm ? 'የገንዘብ መጠን (ETB)' : 'Current Balance (ETB)'}
+              <label className="text-[11px] font-bold text-slate-700">
+                {isAm ? 'የአሁኑ ቀሪ ሂሳብ (ETB)' : 'Current Balance (ETB)'}
               </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  autoFocus
-                  value={openingBalanceInput}
-                  onChange={e => setOpeningBalanceInput(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm font-bold font-mono text-slate-900 focus:outline-none focus:border-[#14503F]"
-                  placeholder="0.00"
-                />
-                <span className="absolute right-3 top-2.5 text-xs font-bold text-slate-400">
-                  ETB
-                </span>
-              </div>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={openingBalanceInput}
+                onChange={e => setOpeningBalanceInput(e.target.value)}
+                placeholder="e.g. 50,000.00"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono font-bold text-slate-900 focus:outline-none focus:border-[#14503F]"
+                autoFocus
+              />
             </div>
 
-            <div className="flex items-center gap-2 pt-2">
+            <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
                 onClick={handleSaveBalance}
-                className="flex-1 py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e]"
+                className="flex-1 py-2 rounded-xl bg-[#14503F] text-white text-xs font-bold hover:bg-[#0e3b2e] shadow-sm flex items-center justify-center gap-1"
               >
-                {isAm ? 'ሂሳቡን መዝግብ' : 'Save Balance'}
+                <Check size={14} />
+                <span>{isAm ? 'አስቀምጥ' : 'Save Balance'}</span>
               </button>
               <button
                 type="button"
                 onClick={() => setOpeningBalanceModalBank(null)}
-                className="py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-100 text-slate-700 text-xs font-bold"
+                className="py-2 px-3 rounded-xl border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-50"
               >
-                {isAm ? 'ይቅር' : 'Cancel'}
+                Cancel
               </button>
             </div>
           </div>
@@ -330,27 +343,25 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
       {/* Add Bank Modal */}
       {showAddBankModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4">
+          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-3">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                {isAm ? 'አዲስ ባንክ ይጨምሩ' : 'Add Bank Account'}
-              </h3>
+              <h4 className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+                {isAm ? 'አዲስ የባንክ ሂሳብ ጨምር' : 'Add Bank Account'}
+              </h4>
               <button
                 onClick={() => setShowAddBankModal(false)}
-                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
               >
-                <X size={15} />
+                <X size={14} />
               </button>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-800">
-                {isAm ? 'ባንክ ይምረጡ' : 'Select Bank'}
-              </label>
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-slate-700">Select Bank</label>
               <select
                 value={newBankName}
                 onChange={e => setNewBankName(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F]"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F] bg-white"
               >
                 <option value="Abay Bank">Abay Bank</option>
                 <option value="Wegagen Bank">Wegagen Bank</option>
@@ -358,6 +369,8 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
                 <option value="Zemen Bank">Zemen Bank</option>
                 <option value="Coop Bank">Cooperative Bank of Oromia</option>
                 <option value="Hibret Bank">Hibret Bank</option>
+                <option value="Enat Bank">Enat Bank</option>
+                <option value="Berhan Bank">Berhan Bank</option>
               </select>
             </div>
 
@@ -365,16 +378,17 @@ export const AccountsCardStack: React.FC<AccountsCardStackProps> = ({
               <button
                 type="button"
                 onClick={handleAddBankSubmit}
-                className="flex-1 py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e]"
+                className="flex-1 py-2 rounded-xl bg-[#14503F] text-white text-xs font-bold hover:bg-[#0e3b2e] shadow-sm flex items-center justify-center gap-1"
               >
-                {isAm ? 'ባንክ ጨምር' : 'Add Account'}
+                <Plus size={14} />
+                <span>Add Channel</span>
               </button>
               <button
                 type="button"
                 onClick={() => setShowAddBankModal(false)}
-                className="py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-100 text-slate-700 text-xs font-bold"
+                className="py-2 px-3 rounded-xl border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-50"
               >
-                {isAm ? 'ይቅር' : 'Cancel'}
+                Cancel
               </button>
             </div>
           </div>

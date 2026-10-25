@@ -16,8 +16,15 @@ import {
   AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
-  HelpCircle
+  HelpCircle,
+  Smartphone,
+  Wifi,
+  Receipt,
+  Banknote,
+  ArrowLeftRight,
+  Tag as TagIcon
 } from 'lucide-react';
+import { getBankBrand } from '../constants/bankBrands.ts';
 
 interface PaymentsListProps {
   payments: PaymentRecord[];
@@ -26,9 +33,11 @@ interface PaymentsListProps {
   onDeletePayment?: (id: string) => Promise<void>;
   onSaveOverride?: (
     paymentId: string,
-    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean }
+    override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean }
   ) => Promise<void>;
 }
+
+const COMMON_TAGS = ['School', 'Wifi', 'Rent', 'Food', 'Other bank'];
 
 export const PaymentsList: React.FC<PaymentsListProps> = ({
   payments,
@@ -45,7 +54,11 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   const [editCounterparty, setEditCounterparty] = useState('');
   const [editDirection, setEditDirection] = useState<PaymentType>('unknown');
   const [editNote, setEditNote] = useState('');
+  const [editTag, setEditTag] = useState('');
   const [savingOverride, setSavingOverride] = useState(false);
+
+  // Performance pagination for 5,000+ rows
+  const [visibleCount, setVisibleCount] = useState(50);
 
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
@@ -161,12 +174,54 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     setRetryingId(null);
   };
 
+  const triggerHaptic = () => {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try {
+        navigator.vibrate(10);
+      } catch {}
+    }
+  };
+
+  const getCategoryIcon = (category?: string) => {
+    switch (category) {
+      case 'airtime':
+        return <Smartphone size={11} className="text-sky-600" />;
+      case 'data':
+        return <Wifi size={11} className="text-blue-600" />;
+      case 'bill':
+        return <Receipt size={11} className="text-amber-600" />;
+      case 'cash':
+        return <Banknote size={11} className="text-emerald-600" />;
+      case 'transfer':
+      default:
+        return <ArrowLeftRight size={11} className="text-slate-500" />;
+    }
+  };
+
+  const getCategoryLabel = (category?: string) => {
+    switch (category) {
+      case 'airtime':
+        return isAm ? 'አየር ሰዓት' : 'Airtime';
+      case 'data':
+        return isAm ? 'ዳታ' : 'Data';
+      case 'bill':
+        return isAm ? 'ቢል' : 'Bill';
+      case 'cash':
+        return isAm ? 'ጥሬ ገንዘብ' : 'Cash';
+      case 'transfer':
+      default:
+        return isAm ? 'ዝውውር' : 'Transfer';
+    }
+  };
+
   const openPaymentModal = (payment: PaymentRecord) => {
+    triggerHaptic();
     setSelectedPayment(payment);
     setIsEditing(false);
     setEditCounterparty(payment.counterparty || '');
     setEditDirection(payment.type);
     setEditNote(payment.note || '');
+    setEditTag(payment.tag || '');
   };
 
   const handleSaveEdit = async () => {
@@ -177,6 +232,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         counterparty: editCounterparty.trim(),
         direction: editDirection,
         note: editNote.trim(),
+        tag: editTag.trim() || undefined,
         isHidden: false,
       });
       setSelectedPayment(prev => prev ? {
@@ -184,6 +240,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         counterparty: editCounterparty.trim(),
         type: editDirection,
         note: editNote.trim(),
+        tag: editTag.trim() || undefined,
         isOverridden: true,
       } : null);
       setIsEditing(false);
@@ -235,8 +292,8 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
       {/* Payment List */}
       <div className="space-y-2">
-        {payments.map(item => {
-          const bankBadge = getBankBadge(item.bank);
+        {payments.slice(0, visibleCount).map(item => {
+          const brand = getBankBrand(item.bank);
           const isReceived = item.type === 'received';
           const isSent = item.type === 'sent';
           const isUnknown = item.type === 'unknown';
@@ -248,12 +305,17 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
               onClick={() => openPaymentModal(item)}
               className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs hover:border-[#14503F]/30 hover:shadow-sm transition-all duration-150 cursor-pointer active:scale-[0.99] flex items-center justify-between gap-3 group"
             >
-              {/* Left Column: Status Dot + Bank Badge & Counterparty */}
+              {/* Left Column: Sync Dot + Bank Logo Badge & Counterparty */}
               <div className="flex items-center gap-2.5 min-w-0">
+                {/* Sync Dot */}
                 {getStatusDot(item.syncStatus)}
 
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border font-black text-[10.5px] ${bankBadge.bg}`}>
-                  <span>{bankBadge.text}</span>
+                {/* Bank Brand Logo Badge */}
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border font-black text-[10.5px] shadow-2xs ${brand.badgeClass}`}
+                  title={brand.name}
+                >
+                  <span>{brand.shortCode}</span>
                 </div>
 
                 <div className="min-w-0">
@@ -261,6 +323,14 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     <span className="text-xs font-bold text-slate-900 truncate font-['Poppins',sans-serif]">
                       {item.counterparty || item.senderAddress}
                     </span>
+
+                    {/* Category Icon Badge (Airtime, Data, Bill, Cash, Transfer) */}
+                    {item.category && (
+                      <span className="inline-flex items-center gap-1 text-[9.5px] font-semibold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.5 rounded-md">
+                        {getCategoryIcon(item.category)}
+                        <span>{getCategoryLabel(item.category)}</span>
+                      </span>
+                    )}
 
                     {/* Dedupe Badge (Rule 6) */}
                     {item.isDuplicate && (
@@ -275,10 +345,18 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                         Edited
                       </span>
                     )}
+
+                    {/* Tag / Label Badge (Rule C4) */}
+                    {item.tag && (
+                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded-md">
+                        <TagIcon size={9} />
+                        {item.tag}
+                      </span>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-1 text-[11px] text-slate-500 mt-0.5 truncate">
-                    <span>{item.bank}</span>
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 truncate">
+                    <span className="font-medium text-slate-600">{item.bank}</span>
                     <span>·</span>
                     <span>{formatDateTime(item.timestamp)}</span>
                   </div>
@@ -291,15 +369,31 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                 </div>
               </div>
 
-              {/* Right Column: Amount + Direction / Status */}
+              {/* Right Column: Direction Arrow + Colored Amount + Status Badge */}
               <div className="text-right shrink-0">
                 {hasParsedAmount ? (
-                  <div className={`text-sm font-extrabold font-['Poppins',sans-serif] ${
-                    isReceived ? 'text-emerald-700' : isSent ? 'text-slate-900' : 'text-amber-700'
-                  }`}>
-                    {formatAmountCompact(item.amount, item.type)}{' '}
-                    <span className="text-[10px] font-semibold">
-                      {isReceived ? (isAm ? 'ገቢ' : 'Received') : isSent ? (isAm ? 'ወጪ' : 'Sent') : ''}
+                  <div className="flex items-center justify-end gap-1 font-['Poppins',sans-serif]">
+                    {/* Small direction arrow */}
+                    {isReceived && (
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-50 text-emerald-600">
+                        <ArrowDownLeft size={12} />
+                      </span>
+                    )}
+                    {isSent && (
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-700">
+                        <ArrowUpRight size={12} />
+                      </span>
+                    )}
+                    {isUnknown && (
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-50 text-amber-600">
+                        <HelpCircle size={12} />
+                      </span>
+                    )}
+
+                    <span className={`text-sm font-extrabold ${
+                      isReceived ? 'text-emerald-700' : isSent ? 'text-slate-900' : 'text-amber-700'
+                    }`}>
+                      {formatAmountCompact(item.amount, item.type)}
                     </span>
                   </div>
                 ) : (
@@ -324,6 +418,20 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
           );
         })}
       </div>
+
+
+      {/* Pagination Load More for 5,000+ items */}
+      {payments.length > visibleCount && (
+        <div className="pt-2 text-center">
+          <button
+            type="button"
+            onClick={() => setVisibleCount(prev => prev + 50)}
+            className="w-full py-2.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:text-[#14503F] hover:bg-slate-50 shadow-2xs transition-all"
+          >
+            Load more ({visibleCount} of {payments.length} shown)
+          </button>
+        </div>
+      )}
 
       {/* Payment Detail & Edit Modal */}
       {selectedPayment && (
@@ -452,6 +560,54 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                   />
                 </div>
 
+                {/* Tag / Label Selection (Rule C4) */}
+                <div className="space-y-1.5 pt-1 border-t border-slate-200/60">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                      <TagIcon size={12} className="text-[#14503F]" />
+                      <span>Tag / Label</span>
+                    </label>
+                    {editTag && (
+                      <button
+                        type="button"
+                        onClick={() => setEditTag('')}
+                        className="text-[10px] text-slate-400 hover:text-slate-600 underline"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {COMMON_TAGS.map(t => {
+                      const isSel = editTag.toLowerCase() === t.toLowerCase();
+                      return (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setEditTag(isSel ? '' : t)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all border ${
+                            isSel
+                              ? 'bg-[#14503F] text-white border-[#14503F] shadow-xs'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    type="text"
+                    value={editTag}
+                    onChange={e => setEditTag(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-[#14503F]"
+                    placeholder="Or type custom label..."
+                  />
+                  <p className="text-[10px] text-slate-400">
+                    💡 Tagging remembers this label for &ldquo;{editCounterparty || 'this sender'}&rdquo; on future transactions.
+                  </p>
+                </div>
+
                 <button
                   type="button"
                   onClick={handleSaveEdit}
@@ -478,6 +634,16 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                   </span>
                 </div>
 
+                {selectedPayment.tag && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Label / Tag:</span>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 px-2 py-0.5 rounded-full">
+                      <TagIcon size={10} />
+                      {selectedPayment.tag}
+                    </span>
+                  </div>
+                )}
+
                 {selectedPayment.balance !== undefined && (
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">SMS Stated Balance:</span>
@@ -501,7 +667,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     className="flex-1 py-1.5 px-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center justify-center gap-1"
                   >
                     <Edit3 size={12} />
-                    <span>Edit Name / Direction</span>
+                    <span>Edit Name / Tag</span>
                   </button>
 
                   <button

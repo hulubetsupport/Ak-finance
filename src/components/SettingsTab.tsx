@@ -1,20 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Save, 
   Check, 
-  ExternalLink, 
   BatteryCharging, 
   ShieldCheck, 
   AlertTriangle, 
   Radio, 
-  Download, 
-  Trash2,
-  ChevronDown,
-  ChevronUp,
-  Plus,
-  X,
-  HelpCircle,
-  Building2
+  Plus, 
+  X, 
+  ExternalLink,
+  Building2,
+  Sparkles
 } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
@@ -23,15 +19,13 @@ import {
   checkNativePermissions, 
   requestNativePermissions, 
   openAndroidBatterySettings, 
-  openAndroidAppSettings, 
-  getNativeStatus, 
-  NativeStatus 
+  openAndroidAppSettings 
 } from '../utils/nativeBridge.ts';
 
 interface SettingsTabProps {
   settings: AppSettings;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
-  onTriggerSyncAll: () => Promise<void>;
+  onTriggerSyncAll?: () => Promise<void>;
 }
 
 const COMMON_BANKS = [
@@ -48,69 +42,133 @@ const COMMON_BANKS = [
   'Hibret Bank',
 ];
 
+const DRAFT_KEY = 'ak_settings_draft_v2';
+
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   settings,
   onUpdateSettings,
-  onTriggerSyncAll,
 }) => {
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
 
-  const [formData, setFormData] = useState({
-    serverUrl: settings.serverUrl,
-    secretKey: settings.secretKey,
-    mode: settings.mode,
-    httpMethod: settings.httpMethod || 'GET',
-    retryIntervalSeconds: settings.retryIntervalSeconds || 15,
+  // Local draft state initialized from localStorage draft (if any) or prop settings
+  const [formData, setFormData] = useState(() => {
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          serverUrl: parsed.serverUrl ?? settings.serverUrl,
+          secretKey: parsed.secretKey ?? settings.secretKey,
+          mode: parsed.mode ?? settings.mode,
+          httpMethod: parsed.httpMethod ?? settings.httpMethod ?? 'GET',
+          retryIntervalSeconds: parsed.retryIntervalSeconds ?? settings.retryIntervalSeconds ?? 15,
+        };
+      }
+    } catch {}
+    return {
+      serverUrl: settings.serverUrl,
+      secretKey: settings.secretKey,
+      mode: settings.mode,
+      httpMethod: settings.httpMethod || 'GET',
+      retryIntervalSeconds: settings.retryIntervalSeconds || 15,
+    };
   });
 
   const [senderBankMap, setSenderBankMap] = useState<Record<string, string>>({});
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [permissions, setPermissions] = useState<{ smsGranted: boolean; notificationsGranted: boolean }>({
     smsGranted: true,
     notificationsGranted: true,
   });
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [clearedNotice, setClearedNotice] = useState(false);
+
+  // Track if user is actively editing to protect inputs from background polling
+  const isDirtyRef = useRef(false);
+  const debounceTimerRef = useRef<any>(null);
 
   // Add Sender Modal state
   const [showAddSenderModal, setShowAddSenderModal] = useState(false);
   const [newSenderCode, setNewSenderCode] = useState('');
   const [newSenderBank, setNewSenderBank] = useState('Telebirr');
 
+  // Load permissions and sender mappings on mount
   useEffect(() => {
-    setFormData({
-      serverUrl: settings.serverUrl,
-      secretKey: settings.secretKey,
-      mode: settings.mode,
-      httpMethod: settings.httpMethod || 'GET',
-      retryIntervalSeconds: settings.retryIntervalSeconds || 15,
-    });
-
-    const refreshInfo = async () => {
+    const refreshMeta = async () => {
       const p = await checkNativePermissions();
       setPermissions(p);
       const sMap = await db.getSenderBankMap();
       setSenderBankMap(sMap);
     };
-    refreshInfo();
-  }, [settings]);
+    refreshMeta();
+  }, []);
 
-  const handleSave = async (e: React.FormEvent) => {
+  // Update draft if external settings change, BUT ONLY if user is not actively editing
+  useEffect(() => {
+    if (!isDirtyRef.current) {
+      setFormData(prev => ({
+        ...prev,
+        serverUrl: settings.serverUrl,
+        secretKey: settings.secretKey,
+        mode: settings.mode,
+        httpMethod: settings.httpMethod || 'GET',
+        retryIntervalSeconds: settings.retryIntervalSeconds || 15,
+      }));
+    }
+  }, [settings.serverUrl, settings.secretKey, settings.mode, settings.httpMethod, settings.retryIntervalSeconds]);
+
+  // Persist draft to localStorage on changes
+  const saveDraftLocally = (data: typeof formData) => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(data));
+    } catch {}
+  };
+
+  // Perform actual save to SharedPreferences / db
+  const performSave = async (dataToSave: typeof formData) => {
+    setSaveStatus('saving');
+    try {
+      const sendersList = Object.keys(senderBankMap);
+      await onUpdateSettings({
+        serverUrl: dataToSave.serverUrl.trim(),
+        secretKey: dataToSave.secretKey.trim(),
+        allowedSenders: sendersList.length > 0 ? sendersList : ['CBE', '127', 'AwashBank', 'Dashen', 'BOA'],
+        mode: dataToSave.mode,
+        httpMethod: dataToSave.httpMethod,
+        retryIntervalSeconds: Number(dataToSave.retryIntervalSeconds) || 15,
+      });
+      isDirtyRef.current = false;
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    } catch (e) {
+      setSaveStatus('idle');
+    }
+  };
+
+  // Trigger debounced autosave 500ms after typing stops
+  const triggerDebouncedAutoSave = (updated: typeof formData) => {
+    isDirtyRef.current = true;
+    saveDraftLocally(updated);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      performSave(updated);
+    }, 500);
+  };
+
+  const handleFieldChange = (field: keyof typeof formData, value: any) => {
+    const updated = { ...formData, [field]: value };
+    setFormData(updated);
+    triggerDebouncedAutoSave(updated);
+  };
+
+  const handleBlur = () => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    performSave(formData);
+  };
+
+  const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const sendersList = Object.keys(senderBankMap);
-
-    await onUpdateSettings({
-      serverUrl: formData.serverUrl.trim(),
-      secretKey: formData.secretKey.trim(),
-      allowedSenders: sendersList.length > 0 ? sendersList : ['CBE', '127', 'AwashBank', 'Dashen', 'BOA'],
-      mode: formData.mode,
-      httpMethod: formData.httpMethod,
-      retryIntervalSeconds: Number(formData.retryIntervalSeconds) || 15,
-    });
-
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    performSave(formData);
   };
 
   const handleAddSender = async () => {
@@ -136,44 +194,39 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     await onUpdateSettings({ allowedSenders: sendersList });
   };
 
-  const handleClearAll = async () => {
-    const msg = isAm 
-      ? 'እርግጠኛ ነዎት? ሁሉንም የተቀረጹ ክፍያዎች ያጠፋል።' 
-      : 'Clear all captured SMS payments from local SQLite database?';
-    if (window.confirm(msg)) {
-      await db.clearAllPayments();
-      await onTriggerSyncAll();
-      setClearedNotice(true);
-      setTimeout(() => setClearedNotice(false), 3000);
-    }
-  };
-
-  const handleExportCsv = async () => {
-    const csv = await db.exportPaymentsCsv();
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `ak_financial_payments_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
-    <div className="space-y-4 pb-24">
-      {/* Title */}
-      <div>
-        <h2 className="text-lg font-extrabold text-slate-900 font-['Poppins',sans-serif]">
-          {t.settings}
-        </h2>
-        <p className="text-xs text-slate-400">
-          {isAm ? 'የቀጥታ SMS መቀበያ እና የሰርቨር ማስተካከያዎች' : 'Native SharedPreferences & SQLite pipeline configuration'}
-        </p>
+    <div className="space-y-3.5 pb-20">
+      {/* Title + Autosave Indicator */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-extrabold text-slate-900 font-['Poppins',sans-serif]">
+            {t.settings}
+          </h2>
+          <p className="text-xs text-slate-400">
+            {isAm ? 'የቀጥታ SMS መቀበያ እና የሰርቨር ማስተካከያዎች' : 'Native SharedPreferences & SQLite pipeline configuration'}
+          </p>
+        </div>
+
+        {/* Status Indicator */}
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold transition-all">
+          {saveStatus === 'saved' ? (
+            <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full text-[11px] font-semibold animate-in fade-in">
+              <Check size={12} className="text-emerald-600 stroke-[3]" />
+              <span>Saved ✓</span>
+            </span>
+          ) : saveStatus === 'saving' ? (
+            <span className="text-slate-400 text-[10px] italic">Saving...</span>
+          ) : (
+            <span className="text-emerald-700/60 text-[10px] font-medium flex items-center gap-1">
+              <Sparkles size={11} />
+              <span>Autosaves</span>
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Permissions Check Card */}
-      <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3">
+      <div className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck size={18} className="text-[#14503F]" />
@@ -192,43 +245,43 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         </div>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+          <div className={`p-2 rounded-xl border flex items-center justify-between ${
             permissions.smsGranted ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'
           }`}>
-            <span className="font-semibold">SMS Permission</span>
+            <span className="font-semibold text-[11px]">SMS Permission</span>
             {permissions.smsGranted ? (
-              <span className="text-[10px] font-bold uppercase bg-emerald-100 px-1.5 py-0.5 rounded">Granted</span>
+              <span className="text-[9.5px] font-bold uppercase bg-emerald-100 px-1.5 py-0.5 rounded">Granted</span>
             ) : (
               <button
                 type="button"
                 onClick={requestNativePermissions}
-                className="text-[10px] font-bold bg-rose-600 text-white px-2 py-0.5 rounded shadow-xs"
+                className="text-[9.5px] font-bold bg-rose-600 text-white px-2 py-0.5 rounded shadow-xs"
               >
                 Grant
               </button>
             )}
           </div>
 
-          <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+          <div className={`p-2 rounded-xl border flex items-center justify-between ${
             permissions.notificationsGranted ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-slate-50 border-slate-200 text-slate-700'
           }`}>
-            <span className="font-semibold">Notifications</span>
-            <span className="text-[10px] font-bold uppercase bg-white/80 px-1.5 py-0.5 rounded">
+            <span className="font-semibold text-[11px]">Notifications</span>
+            <span className="text-[9.5px] font-bold uppercase bg-white/80 px-1.5 py-0.5 rounded">
               {permissions.notificationsGranted ? 'Active' : 'Optional'}
             </span>
           </div>
         </div>
 
         {!permissions.smsGranted && (
-          <div className="bg-amber-50 border border-amber-300/80 rounded-2xl p-3.5 space-y-2 mt-2">
+          <div className="bg-amber-50 border border-amber-300/80 rounded-2xl p-3 space-y-2 mt-1">
             <div className="flex items-start gap-2 text-amber-900">
-              <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+              <AlertTriangle size={15} className="text-amber-600 shrink-0 mt-0.5" />
               <div className="text-xs">
-                <p className="font-bold">
+                <p className="font-bold text-[11.5px]">
                   {isAm ? 'አንድሮይድ 13+ ፍቃድ አሰጣጥ መመሪያ' : 'Android 13+ Permission Guide'}
                 </p>
-                <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
-                  Open App info (ACTION_APPLICATION_DETAILS_SETTINGS) → ⋮ top right → <b>"Allow restricted settings"</b> → confirm screen lock → grant SMS permission.
+                <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                  Go to Settings → Apps → Ak Finance. Tap the three dots (⋮) in the top right corner and tap <b>"Allow restricted settings"</b> → confirm screen lock → grant SMS.
                 </p>
               </div>
             </div>
@@ -236,9 +289,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <button
               type="button"
               onClick={openAndroidAppSettings}
-              className="w-full py-2 px-3 rounded-xl bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700 transition-colors flex items-center justify-center gap-1.5"
+              className="w-full py-1.5 px-3 rounded-xl bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700 transition-colors flex items-center justify-center gap-1.5"
             >
-              <ExternalLink size={13} />
+              <ExternalLink size={12} />
               <span>Open App Info (Settings)</span>
             </button>
           </div>
@@ -246,7 +299,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       </div>
 
       {/* Main Settings Form */}
-      <form onSubmit={handleSave} className="space-y-3.5">
+      <form onSubmit={handleManualSubmit} className="space-y-3">
         <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3.5">
           {/* 1. Server URL */}
           <div className="space-y-1">
@@ -256,14 +309,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <input
               type="url"
               value={formData.serverUrl}
-              onChange={e => setFormData({ ...formData, serverUrl: e.target.value })}
+              onChange={e => handleFieldChange('serverUrl', e.target.value)}
+              onBlur={handleBlur}
               className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#14503F] focus:ring-1 focus:ring-[#14503F]"
               placeholder="https://example.com/api/save_sms"
             />
             <p className="text-[10px] text-slate-400">
               {isAm 
                 ? 'የተጻፈው URL ልክ እንዳለ ይጠቀማል (ምንም ተጨማሪ path አይጨመርም)' 
-                : 'Exact URL typed is used; query parameters action=save_sms, token, sender, message are sent.'}
+                : 'Exact URL typed is used; parameters action=save_sms, token, sender, message are sent.'}
             </p>
           </div>
 
@@ -275,13 +329,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <input
               type="text"
               value={formData.secretKey}
-              onChange={e => setFormData({ ...formData, secretKey: e.target.value })}
+              onChange={e => handleFieldChange('secretKey', e.target.value)}
+              onBlur={handleBlur}
               className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#14503F]"
               placeholder="ak_secret_key_..."
             />
           </div>
 
-          {/* 3. SENDER → BANK MAP (Rule 1) */}
+          {/* 3. SENDER → BANK MAP */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-slate-800 font-['Poppins',sans-serif]">
@@ -297,7 +352,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </button>
             </div>
 
-            {/* Configured Sender Chips */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {Object.entries(senderBankMap).map(([senderCode, bankName]) => (
                 <div
@@ -309,7 +363,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                       {senderCode} · {bankName}
                     </span>
                     <span className="text-[10px] text-slate-400">
-                      {senderCode === '127' ? 'Telebirr SMS Sender ID' : 'Bank SMS Sender'}
+                      {senderCode === '127' ? 'Telebirr SMS Sender' : 'Bank SMS Sender'}
                     </span>
                   </div>
 
@@ -327,8 +381,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
             <p className="text-[10px] text-slate-400">
               {isAm 
-                ? 'ባንኩ የሚለየው በመጀመሪያ ከላኪው (Sender) ነው፤ ካልታወቀ ብቻ ከ SMS ጽሑፉ ይገመታል' 
-                : 'Bank is decided from SENDER first (e.g. 127 → Telebirr). Only if unknown, guessed from text.'}
+                ? 'ባንኩ የሚለየው በመጀመሪያ ከላኪው (Sender) ነው (ምሳሌ 127 → Telebirr)' 
+                : 'Decide bank from SENDER first (e.g. 127 → Telebirr). Only if unknown, guessed from text.'}
             </p>
           </div>
 
@@ -341,7 +395,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setFormData({ ...formData, mode: 'server' })}
+                onClick={() => handleFieldChange('mode', 'server')}
                 className={`p-3 rounded-xl border text-left transition-all ${
                   formData.mode === 'server'
                     ? 'bg-emerald-50 border-[#14503F] text-[#14503F]'
@@ -358,7 +412,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
               <button
                 type="button"
-                onClick={() => setFormData({ ...formData, mode: 'local' })}
+                onClick={() => handleFieldChange('mode', 'local')}
                 className={`p-3 rounded-xl border text-left transition-all ${
                   formData.mode === 'local'
                     ? 'bg-emerald-50 border-[#14503F] text-[#14503F]'
@@ -374,46 +428,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </button>
             </div>
           </div>
-
-          {/* Collapsible: Advanced Protocol Options */}
-          <div className="pt-2 border-t border-slate-100">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="flex items-center justify-between w-full text-xs font-bold text-slate-600 hover:text-slate-900"
-            >
-              <span>Protocol Options (Method: {formData.httpMethod}, Interval: {formData.retryIntervalSeconds}s)</span>
-              {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            </button>
-
-            {showAdvanced && (
-              <div className="grid grid-cols-2 gap-3 pt-3">
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">HTTP Method</label>
-                  <select
-                    value={formData.httpMethod}
-                    onChange={e => setFormData({ ...formData, httpMethod: e.target.value as 'GET' | 'POST' })}
-                    className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F]"
-                  >
-                    <option value="GET">GET (Default)</option>
-                    <option value="POST">POST (Form-encoded)</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600">Retry Interval (s)</label>
-                  <input
-                    type="number"
-                    min={5}
-                    max={3600}
-                    value={formData.retryIntervalSeconds}
-                    onChange={e => setFormData({ ...formData, retryIntervalSeconds: Number(e.target.value) || 15 })}
-                    className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-mono focus:outline-none focus:border-[#14503F]"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Save Button */}
@@ -421,7 +435,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           type="submit"
           className="w-full py-3 rounded-2xl bg-[#14503F] text-white font-bold text-xs shadow-md hover:bg-[#0e3b2e] active:scale-98 transition-all flex items-center justify-center gap-2"
         >
-          {saveSuccess ? (
+          {saveStatus === 'saved' ? (
             <>
               <Check size={16} className="text-emerald-300" />
               <span>Saved to SharedPreferences "ejeta"!</span>
@@ -435,33 +449,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         </button>
       </form>
 
-      {/* Utility Actions */}
-      <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-2">
-        <h3 className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
-          {isAm ? 'የዳታ አስተዳደር' : 'Data Management & CSV Export'}
-        </h3>
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors flex items-center justify-center gap-1.5"
-          >
-            <Download size={14} />
-            <span>{t.exportCsv}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleClearAll}
-            className="py-2.5 px-3 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-colors flex items-center justify-center gap-1.5"
-          >
-            <Trash2 size={14} />
-            <span>{clearedNotice ? 'Cleared!' : 'Clear All Payments'}</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Add Sender Dialog ("Which bank is this?") */}
+      {/* Add Sender Dialog */}
       {showAddSenderModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4">

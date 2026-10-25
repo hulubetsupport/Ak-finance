@@ -14,6 +14,9 @@ const config: CapacitorConfig = {
     webContentsDebuggingEnabled: true,
   },
   plugins: {
+    Keyboard: {
+      resize: 'body',
+    },
     SplashScreen: {
       launchShowDuration: 1500,
       backgroundColor: '#14503F',

@@ -14,6 +14,8 @@ import {
   getNativeSenderBankMap,
   saveNativeSenderBankMap,
   deleteNativeSenderBankMap,
+  getNativeCounterpartyTags,
+  saveNativeCounterpartyTag,
   NativeSmsMessage 
 } from '../utils/nativeBridge.ts';
 
@@ -160,22 +162,36 @@ class DatabaseService {
 
   public async saveSmsOverride(
     smsId: string,
-    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean }
+    override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean }
   ): Promise<void> {
     await saveNativeSmsOverride(
       Number(smsId),
       override.counterparty ?? null,
       override.direction ?? null,
       override.note || '',
-      !!override.isHidden
+      !!override.isHidden,
+      override.tag || ''
     );
+    // If tag is set and counterparty is non-empty, remember it
+    if (override.tag && override.counterparty) {
+      await saveNativeCounterpartyTag(override.counterparty.trim(), override.tag.trim());
+    }
+  }
+
+  public async getCounterpartyTags(): Promise<Record<string, string>> {
+    return getNativeCounterpartyTags();
+  }
+
+  public async saveCounterpartyTag(counterparty: string, tag: string): Promise<void> {
+    await saveNativeCounterpartyTag(counterparty, tag);
   }
 
   public async getAllPayments(includeHidden = false): Promise<PaymentRecord[]> {
-    const [messages, overrides, senderMap] = await Promise.all([
+    const [messages, overrides, senderMap, counterpartyTags] = await Promise.all([
       getNativeMessages(),
       getNativeSmsOverrides(),
       getNativeSenderBankMap(),
+      getNativeCounterpartyTags(),
     ]);
 
     // Parse and augment with overrides
@@ -193,14 +209,20 @@ class DatabaseService {
       const counterparty = ov?.counterparty || parsed.counterparty;
       const type = (ov?.direction as any) || parsed.type;
       const note = ov?.note || undefined;
-      const isOverridden = !!(ov && (ov.counterparty || ov.direction || ov.note || ov.isHidden));
+      const rememberedTag = counterpartyTags[counterparty.trim()] || counterpartyTags[counterparty.toLowerCase().trim()];
+      const tag = ov?.tag || rememberedTag || undefined;
+      const isOverridden = !!(ov && (ov.counterparty || ov.direction || ov.note || ov.tag || ov.isHidden));
 
       return {
         id: String(msg.id),
         senderAddress: msg.sender || '',
         bank: parsed.bank,
         type,
+        category: parsed.category,
         amount: parsed.amount,
+        amountCents: parsed.amountCents,
+        fee: parsed.fee,
+        feeCents: parsed.feeCents,
         currency: 'ETB',
         counterparty,
         reference: parsed.reference || `SMS-${msg.id}`,
@@ -217,6 +239,7 @@ class DatabaseService {
         source: 'sms',
         isDuplicate: false,
         note,
+        tag,
         isHidden,
         isOverridden,
       };
@@ -282,24 +305,28 @@ class DatabaseService {
       // Filter payments that are not duplicate for amounts
       const nonDuplicatePayments = bankPayments.filter(p => !p.isDuplicate);
 
-      // Check this month's received and sent
-      let receivedThisMonth = 0;
-      let sentThisMonth = 0;
-      let totalReceived = 0;
-      let totalSent = 0;
+      // Check this month's received and sent using integer cents
+      let receivedCentsThisMonth = 0;
+      let sentCentsThisMonth = 0;
+      let totalReceivedCents = 0;
+      let totalSentCents = 0;
 
       for (const p of nonDuplicatePayments) {
         const d = new Date(p.timestamp);
         const isCurrentMonth = d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+        const pCents = p.amountCents ?? Math.round(p.amount * 100);
 
         if (p.type === 'received') {
-          totalReceived += p.amount;
-          if (isCurrentMonth) receivedThisMonth += p.amount;
+          totalReceivedCents += pCents;
+          if (isCurrentMonth) receivedCentsThisMonth += pCents;
         } else if (p.type === 'sent') {
-          totalSent += p.amount;
-          if (isCurrentMonth) sentThisMonth += p.amount;
+          totalSentCents += pCents;
+          if (isCurrentMonth) sentCentsThisMonth += pCents;
         }
       }
+
+      const receivedThisMonth = receivedCentsThisMonth / 100;
+      const sentThisMonth = sentCentsThisMonth / 100;
 
       // Check if latest SMS contains explicit "current balance"
       const smsWithBalance = bankPayments.find(p => p.extractedBalance !== undefined && p.extractedBalance !== null);
@@ -313,12 +340,13 @@ class DatabaseService {
         currentBalance = smsWithBalance.extractedBalance;
         hasSyncedBalance = true;
       } else if (openingBal !== undefined) {
-        // Opening balance + received - sent
-        currentBalance = openingBal + totalReceived - totalSent;
+        // Opening balance + received - sent (calculated in integer cents)
+        const openCents = Math.round(openingBal * 100);
+        currentBalance = (openCents + totalReceivedCents - totalSentCents) / 100;
         hasSyncedBalance = true;
       } else {
         // No explicit balance and no opening balance set yet
-        currentBalance = totalReceived - totalSent;
+        currentBalance = (totalReceivedCents - totalSentCents) / 100;
         hasSyncedBalance = false;
       }
 
@@ -394,7 +422,7 @@ class DatabaseService {
 
   public async exportPaymentsCsv(): Promise<string> {
     const list = await this.getAllPayments(true);
-    const header = ['ID', 'Date', 'Bank', 'Type', 'Amount (ETB)', 'Counterparty', 'Reference', 'Account', 'Sync Status', 'Duplicate', 'Hidden', 'Note', 'Raw SMS'];
+    const header = ['ID', 'Date', 'Bank', 'Type', 'Amount (ETB)', 'Counterparty', 'Tag', 'Reference', 'Account', 'Sync Status', 'Duplicate', 'Hidden', 'Note', 'Raw SMS'];
     const rows = list.map(p => [
       p.id,
       p.date,
@@ -402,6 +430,7 @@ class DatabaseService {
       p.type,
       p.amount,
       `"${(p.counterparty || '').replace(/"/g, '""')}"`,
+      `"${p.tag || ''}"`,
       `"${p.reference}"`,
       `"${p.accountNumber || ''}"`,
       p.syncStatus,
@@ -411,6 +440,110 @@ class DatabaseService {
       `"${p.rawMessage.replace(/"/g, '""')}"`,
     ]);
     return [header.join(','), ...rows.map(r => r.join(','))].join('\n');
+  }
+
+  public async exportFullBackupJson(): Promise<string> {
+    const [messages, openingBalances, overrides, senderBankMap, counterpartyTags, settings] = await Promise.all([
+      getNativeMessages(),
+      getNativeOpeningBalances(),
+      getNativeSmsOverrides(),
+      getNativeSenderBankMap(),
+      getNativeCounterpartyTags(),
+      this.getSettings(),
+    ]);
+
+    const backup = {
+      app: 'Ak Finance',
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      messages,
+      openingBalances,
+      overrides,
+      senderBankMap,
+      counterpartyTags,
+      settings,
+    };
+
+    return JSON.stringify(backup, null, 2);
+  }
+
+  public async importFullBackupJson(jsonString: string): Promise<{ success: boolean; count: number; error?: string }> {
+    try {
+      const data = JSON.parse(jsonString);
+      if (!data || typeof data !== 'object') {
+        return { success: false, count: 0, error: 'Invalid backup file format' };
+      }
+
+      let restoredCount = 0;
+
+      // 1. Restore Opening Balances
+      if (data.openingBalances && typeof data.openingBalances === 'object') {
+        for (const [bank, amount] of Object.entries(data.openingBalances)) {
+          if (typeof amount === 'number') {
+            await this.saveOpeningBalance(bank, amount);
+          }
+        }
+      }
+
+      // 2. Restore Sender Bank Map
+      if (data.senderBankMap && typeof data.senderBankMap === 'object') {
+        for (const [sender, bankName] of Object.entries(data.senderBankMap)) {
+          if (typeof bankName === 'string') {
+            await this.saveSenderBankMapping(sender, bankName);
+          }
+        }
+      }
+
+      // 3. Restore Counterparty Tags
+      if (data.counterpartyTags && typeof data.counterpartyTags === 'object') {
+        for (const [cp, tg] of Object.entries(data.counterpartyTags)) {
+          if (typeof tg === 'string') {
+            await this.saveCounterpartyTag(cp, tg);
+          }
+        }
+      }
+
+      // 4. Restore SMS Overrides
+      if (data.overrides && typeof data.overrides === 'object') {
+        for (const [smsId, ov] of Object.entries(data.overrides as Record<string, any>)) {
+          if (ov && typeof ov === 'object') {
+            await this.saveSmsOverride(smsId, {
+              counterparty: ov.counterparty,
+              direction: ov.direction,
+              note: ov.note,
+              tag: ov.tag,
+              isHidden: !!ov.isHidden,
+            });
+          }
+        }
+      }
+
+      // 5. Restore Settings
+      if (data.settings && typeof data.settings === 'object') {
+        await this.saveSettings({
+          serverUrl: data.settings.serverUrl,
+          secretKey: data.settings.secretKey,
+          httpMethod: data.settings.httpMethod,
+          retryIntervalSeconds: data.settings.retryIntervalSeconds,
+          mode: data.settings.mode,
+          allowedSenders: data.settings.allowedSenders,
+        });
+      }
+
+      // 6. Restore Messages if in local storage simulation
+      if (Array.isArray(data.messages)) {
+        for (const m of data.messages) {
+          if (m && m.sender && m.body) {
+            await this.insertTestSms(m.sender, m.body);
+            restoredCount++;
+          }
+        }
+      }
+
+      return { success: true, count: restoredCount || Object.keys(data.overrides || {}).length };
+    } catch (e: any) {
+      return { success: false, count: 0, error: e?.message || 'Failed to parse backup JSON' };
+    }
   }
 }
 

@@ -36,8 +36,20 @@ public class MainActivity extends BridgeActivity {
         setupJavascriptBridge();
     }
 
+    @Override
+    public void onBackPressed() {
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            getBridge().getWebView().evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('androidBackPressed'));", null
+            );
+        } else {
+            super.onBackPressed();
+        }
+    }
+
     private void setupJavascriptBridge() {
         if (getBridge() != null && getBridge().getWebView() != null) {
+            getBridge().getWebView().setBackgroundColor(android.graphics.Color.parseColor("#F4F7F5"));
             getBridge().getWebView().addJavascriptInterface(new AndroidNativeBridge(this), "AndroidBridge");
         }
     }
@@ -89,6 +101,11 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public boolean isNative() {
             return true;
+        }
+
+        @JavascriptInterface
+        public void exitApp() {
+            activity.finish();
         }
 
         @JavascriptInterface
@@ -327,7 +344,7 @@ public class MainActivity extends BridgeActivity {
         public String getSmsOverrides() {
             try {
                 SQLiteDatabase db = Db.get(activity).getReadableDatabase();
-                Cursor q = db.rawQuery("SELECT sms_id, counterparty, direction, note, is_hidden FROM sms_overrides", null);
+                Cursor q = db.rawQuery("SELECT sms_id, counterparty, direction, note, is_hidden, tag FROM sms_overrides", null);
                 JSONObject obj = new JSONObject();
                 while (q.moveToNext()) {
                     long id = q.getLong(0);
@@ -336,6 +353,7 @@ public class MainActivity extends BridgeActivity {
                     row.put("direction", q.isNull(2) ? JSONObject.NULL : q.getString(2));
                     row.put("note", q.isNull(3) ? "" : q.getString(3));
                     row.put("isHidden", q.getInt(4) == 1);
+                    row.put("tag", q.isNull(5) ? "" : q.getString(5));
                     obj.put(String.valueOf(id), row);
                 }
                 q.close();
@@ -347,10 +365,43 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public boolean saveSmsOverride(long smsId, String counterparty, String direction, String note, boolean isHidden) {
+            return saveSmsOverrideWithTag(smsId, counterparty, direction, note, isHidden, "");
+        }
+
+        @JavascriptInterface
+        public boolean saveSmsOverrideWithTag(long smsId, String counterparty, String direction, String note, boolean isHidden, String tag) {
             try {
                 SQLiteDatabase db = Db.get(activity).getWritableDatabase();
-                db.execSQL("INSERT OR REPLACE INTO sms_overrides (sms_id, counterparty, direction, note, is_hidden, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        new Object[]{smsId, counterparty, direction, note, isHidden ? 1 : 0, System.currentTimeMillis()});
+                db.execSQL("INSERT OR REPLACE INTO sms_overrides (sms_id, counterparty, direction, note, is_hidden, tag, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        new Object[]{smsId, counterparty, direction, note, isHidden ? 1 : 0, tag != null ? tag : "", System.currentTimeMillis()});
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String getCounterpartyTags() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getReadableDatabase();
+                Cursor q = db.rawQuery("SELECT counterparty, tag FROM counterparty_tags", null);
+                JSONObject obj = new JSONObject();
+                while (q.moveToNext()) {
+                    obj.put(q.getString(0), q.getString(1));
+                }
+                q.close();
+                return obj.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean saveCounterpartyTag(String counterparty, String tag) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.execSQL("INSERT OR REPLACE INTO counterparty_tags (counterparty, tag, updated_at) VALUES (?, ?, ?)",
+                        new Object[]{counterparty, tag, System.currentTimeMillis()});
                 return true;
             } catch (Exception e) {
                 return false;

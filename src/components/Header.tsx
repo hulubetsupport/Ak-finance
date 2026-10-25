@@ -1,5 +1,5 @@
 import React from 'react';
-import { Bell, Eye, EyeOff, Globe } from 'lucide-react';
+import { Bell, Eye, EyeOff, Globe, MoreVertical } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
 import { NativeStatus } from '../utils/nativeBridge.ts';
 import { translations } from '../utils/i18n.ts';
@@ -11,6 +11,7 @@ interface HeaderProps {
   onToggleLanguage: () => void;
   onOpenNotifications: () => void;
   onOpenSettings: () => void;
+  onOpenMenu: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -20,6 +21,7 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleLanguage,
   onOpenNotifications,
   onOpenSettings,
+  onOpenMenu,
 }) => {
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
@@ -96,7 +98,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Center / Right controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {/* Status Pill */}
           <button
             onClick={onOpenSettings}
@@ -138,6 +140,16 @@ export const Header: React.FC<HeaderProps> = ({
             {nativeStatus.pending > 0 && (
               <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-white" />
             )}
+          </button>
+
+          {/* 3-dot Header Menu (Rule C1) */}
+          <button
+            onClick={onOpenMenu}
+            aria-label="Menu"
+            className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:text-[#14503F] shadow-xs transition-all active:scale-95"
+            title="Settings, Security, Backup & Restore, About"
+          >
+            <MoreVertical size={16} />
           </button>
         </div>
       </div>

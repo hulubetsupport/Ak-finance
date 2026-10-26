@@ -1,4 +1,4 @@
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry, SyncStatus } from '../types/index.ts';
+import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry, SyncStatus, ServerResultRecord } from '../types/index.ts';
 import { parseBankSms, DEFAULT_SENDER_BANK_MAP } from '../utils/smsParser.ts';
 import { 
   getNativeSettings, 
@@ -16,6 +16,7 @@ import {
   deleteNativeSenderBankMap,
   getNativeCounterpartyTags,
   saveNativeCounterpartyTag,
+  getNativeServerResults,
   NativeSmsMessage 
 } from '../utils/nativeBridge.ts';
 
@@ -187,14 +188,15 @@ class DatabaseService {
   }
 
   public async getAllPayments(includeHidden = false): Promise<PaymentRecord[]> {
-    const [messages, overrides, senderMap, counterpartyTags] = await Promise.all([
+    const [messages, overrides, senderMap, counterpartyTags, serverResults] = await Promise.all([
       getNativeMessages(),
       getNativeSmsOverrides(),
       getNativeSenderBankMap(),
       getNativeCounterpartyTags(),
+      getNativeServerResults(),
     ]);
 
-    // Parse and augment with overrides
+    // Parse and augment with overrides and server results
     const parsedList: PaymentRecord[] = messages.map(msg => {
       const parsed = parseBankSms(msg.sender || 'Bank', msg.body || '', senderMap);
       let status: SyncStatus = 'pending';
@@ -204,6 +206,44 @@ class DatabaseService {
       else status = 'pending';
 
       const ov = overrides[String(msg.id)];
+      const sr = serverResults[String(msg.id)];
+
+      let serverResultObj: ServerResultRecord | undefined = undefined;
+      let ftNumber = parsed.ftNumber;
+      let v2Code = parsed.v2Code;
+      let reference = parsed.reference || `SMS-${msg.id}`;
+
+      if (sr) {
+        let parsedRaw: any = {};
+        if (sr.raw) {
+          try {
+            parsedRaw = JSON.parse(sr.raw);
+          } catch {}
+        }
+        serverResultObj = {
+          smsId: sr.smsId,
+          httpCode: sr.httpCode,
+          status: (sr.status as any) || 'Unknown',
+          ref: sr.ref || parsedRaw.ref,
+          reason: sr.reason || parsedRaw.reason,
+          raw: sr.raw,
+          at: sr.at,
+          resolving: !!parsedRaw.resolving,
+          v2: parsedRaw.v2,
+          bank: parsedRaw.bank,
+          type: parsedRaw.type,
+          amount: parsedRaw.amount,
+        };
+
+        // When the server returns a ref, save it as the FT
+        if (serverResultObj.ref) {
+          ftNumber = serverResultObj.ref;
+          reference = serverResultObj.ref;
+        }
+        if (serverResultObj.v2 && !v2Code) {
+          v2Code = serverResultObj.v2;
+        }
+      }
 
       const isHidden = ov ? !!ov.isHidden : false;
       const counterparty = ov?.counterparty || parsed.counterparty;
@@ -221,13 +261,17 @@ class DatabaseService {
         category: parsed.category,
         amount: parsed.amount,
         amountCents: parsed.amountCents,
+        amountSantim: parsed.amountSantim ?? parsed.amountCents,
         fee: parsed.fee,
         feeCents: parsed.feeCents,
         currency: 'ETB',
         counterparty,
-        reference: parsed.reference || `SMS-${msg.id}`,
+        reference,
+        ftNumber,
+        v2Code,
         accountNumber: parsed.accountNumber,
         balance: parsed.balance,
+        balanceSantim: parsed.balanceSantim,
         extractedBalance: parsed.balance,
         rawMessage: msg.body || '',
         timestamp: msg.ts || Date.now(),
@@ -236,6 +280,7 @@ class DatabaseService {
         retryCount: msg.tries || 0,
         errorMessage: msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : undefined),
         serverResponse: msg.code ? `HTTP ${msg.code}` : undefined,
+        serverResult: serverResultObj,
         source: 'sms',
         isDuplicate: false,
         note,
@@ -328,16 +373,17 @@ class DatabaseService {
       const receivedThisMonth = receivedCentsThisMonth / 100;
       const sentThisMonth = sentCentsThisMonth / 100;
 
-      // Check if latest SMS contains explicit "current balance"
-      const smsWithBalance = bankPayments.find(p => p.extractedBalance !== undefined && p.extractedBalance !== null);
+      // Check if latest SMS contains explicit "current balance" (Telebirr ቀሪ ሂሳብ too)
+      const sortedByTimeDesc = [...bankPayments].sort((a, b) => b.timestamp - a.timestamp);
+      const latestSmsWithBalance = sortedByTimeDesc.find(p => p.extractedBalance !== undefined && p.extractedBalance !== null);
 
       let currentBalance = 0;
       let hasSyncedBalance = false;
       const openingBal = openingBalances[base.bank] ?? openingBalances[base.name];
 
-      if (smsWithBalance && smsWithBalance.extractedBalance !== undefined) {
-        // True balance from bank SMS
-        currentBalance = smsWithBalance.extractedBalance;
+      if (latestSmsWithBalance && latestSmsWithBalance.extractedBalance !== undefined) {
+        // True balance from latest bank SMS (CBE or Telebirr ቀሪ ሂሳብ)
+        currentBalance = latestSmsWithBalance.extractedBalance;
         hasSyncedBalance = true;
       } else if (openingBal !== undefined) {
         // Opening balance + received - sent (calculated in integer cents)
@@ -422,61 +468,168 @@ class DatabaseService {
 
   public async exportPaymentsCsv(): Promise<string> {
     const list = await this.getAllPayments(true);
-    const header = ['ID', 'Date', 'Bank', 'Type', 'Amount (ETB)', 'Counterparty', 'Tag', 'Reference', 'Account', 'Sync Status', 'Duplicate', 'Hidden', 'Note', 'Raw SMS'];
-    const rows = list.map(p => [
-      p.id,
-      p.date,
-      `"${p.bank}"`,
-      p.type,
-      p.amount,
-      `"${(p.counterparty || '').replace(/"/g, '""')}"`,
-      `"${p.tag || ''}"`,
-      `"${p.reference}"`,
-      `"${p.accountNumber || ''}"`,
-      p.syncStatus,
-      p.isDuplicate ? 'Yes' : 'No',
-      p.isHidden ? 'Yes' : 'No',
-      `"${(p.note || '').replace(/"/g, '""')}"`,
-      `"${p.rawMessage.replace(/"/g, '""')}"`,
-    ]);
-    return [header.join(','), ...rows.map(r => r.join(','))].join('\n');
+    // Requirement E5: UTF-8 BOM (\uFEFF) so Excel opens Amharic correctly
+    const header = [
+      'Date',
+      'Bank',
+      'Direction',
+      'Amount (ETB)',
+      'Counterparty',
+      'Category',
+      'Tag',
+      'Note',
+      'Ref/FT',
+      'Balance',
+      'Server status',
+      'Raw SMS',
+    ];
+
+    const rows = list.map(p => {
+      const direction = p.type === 'received' ? 'Received' : 'Sent';
+      const ref = p.ftNumber || p.v2Code || p.reference || '';
+      const balanceStr = p.balance !== undefined ? p.balance.toFixed(2) : '';
+      const serverStatus = p.serverResult?.status || (p.syncStatus === 'sent' ? 'Saved' : p.syncStatus === 'pending' ? 'Pending' : 'Failed');
+      const category = p.category ? p.category.toUpperCase() : (p.type === 'received' ? 'RECEIVED' : 'TRANSFER');
+
+      return [
+        `"${p.date}"`,
+        `"${p.bank}"`,
+        `"${direction}"`,
+        p.amount.toFixed(2),
+        `"${(p.counterparty || '').replace(/"/g, '""')}"`,
+        `"${category}"`,
+        `"${(p.tag || '').replace(/"/g, '""')}"`,
+        `"${(p.note || '').replace(/"/g, '""')}"`,
+        `"${ref.replace(/"/g, '""')}"`,
+        `"${balanceStr}"`,
+        `"${serverStatus}"`,
+        `"${p.rawMessage.replace(/"/g, '""')}"`,
+      ].join(',');
+    });
+
+    return '\uFEFF' + [header.join(','), ...rows].join('\r\n');
   }
 
-  public async exportFullBackupJson(): Promise<string> {
-    const [messages, openingBalances, overrides, senderBankMap, counterpartyTags, settings] = await Promise.all([
+  public async exportFullBackupJson(includeSecretKey: boolean = false): Promise<string> {
+    const [messages, serverResults, openingBalances, overrides, senderBankMap, counterpartyTags, withdrawals, settings] = await Promise.all([
       getNativeMessages(),
+      getNativeServerResults(),
       getNativeOpeningBalances(),
       getNativeSmsOverrides(),
       getNativeSenderBankMap(),
       getNativeCounterpartyTags(),
+      this.getAllWithdrawals(),
       this.getSettings(),
     ]);
 
+    let customAccounts: any[] = [];
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
+      if (stored) customAccounts = JSON.parse(stored);
+    } catch {}
+
     const backup = {
       app: 'Ak Finance',
-      version: 2,
+      version: 4,
+      appVersion: '2.0.0',
       exportedAt: new Date().toISOString(),
+      stats: {
+        paymentsCount: messages.length,
+        banksCount: Object.keys(openingBalances).length || 5,
+        tagsCount: Object.keys(counterpartyTags).length,
+      },
+      settings: {
+        ...settings,
+        // Requirement E3: Secret key off by default; replace with "" if not requested
+        secretKey: includeSecretKey ? (settings.secretKey || '') : '',
+      },
       messages,
+      serverResults,
       openingBalances,
       overrides,
       senderBankMap,
       counterpartyTags,
-      settings,
+      customAccounts,
+      withdrawals,
     };
 
     return JSON.stringify(backup, null, 2);
   }
 
-  public async importFullBackupJson(jsonString: string): Promise<{ success: boolean; count: number; error?: string }> {
+  public inspectBackupJson(jsonString: string): {
+    valid: boolean;
+    version?: number;
+    paymentsCount: number;
+    banksCount: number;
+    tagsCount: number;
+    hasSecretKey: boolean;
+    error?: string;
+    data?: any;
+  } {
     try {
       const data = JSON.parse(jsonString);
       if (!data || typeof data !== 'object') {
-        return { success: false, count: 0, error: 'Invalid backup file format' };
+        return { valid: false, paymentsCount: 0, banksCount: 0, tagsCount: 0, hasSecretKey: false, error: 'File is not a valid JSON object.' };
       }
 
-      let restoredCount = 0;
+      const version = data.version || 1;
+      // Requirement E4: Check schema version, reject unknown future versions
+      if (typeof version === 'number' && version > 4) {
+        return {
+          valid: false,
+          version,
+          paymentsCount: 0,
+          banksCount: 0,
+          tagsCount: 0,
+          hasSecretKey: false,
+          error: `Unsupported backup version (${version}). Please update Ak Finance first.`,
+        };
+      }
 
-      // 1. Restore Opening Balances
+      const paymentsCount = Array.isArray(data.messages) ? data.messages.length : 0;
+      const banksCount = data.openingBalances && typeof data.openingBalances === 'object'
+        ? Object.keys(data.openingBalances).length
+        : (data.senderBankMap ? Object.keys(data.senderBankMap).length : 5);
+      const tagsCount = data.counterpartyTags && typeof data.counterpartyTags === 'object'
+        ? Object.keys(data.counterpartyTags).length
+        : 0;
+      const hasSecretKey = Boolean(data.settings && data.settings.secretKey && data.settings.secretKey.trim().length > 0);
+
+      return {
+        valid: true,
+        version,
+        paymentsCount,
+        banksCount,
+        tagsCount,
+        hasSecretKey,
+        data,
+      };
+    } catch (e: any) {
+      return {
+        valid: false,
+        paymentsCount: 0,
+        banksCount: 0,
+        tagsCount: 0,
+        hasSecretKey: false,
+        error: e?.message || 'Failed to parse JSON file.',
+      };
+    }
+  }
+
+  public async importFullBackupJson(
+    jsonString: string,
+    mode: 'merge' | 'replace' = 'merge'
+  ): Promise<{ success: boolean; count: number; banksCount: number; tagsCount: number; error?: string }> {
+    const inspection = this.inspectBackupJson(jsonString);
+    if (!inspection.valid || !inspection.data) {
+      return { success: false, count: 0, banksCount: 0, tagsCount: 0, error: inspection.error || 'Invalid backup file.' };
+    }
+
+    const data = inspection.data;
+    let restoredPaymentsCount = 0;
+
+    try {
+      // 1. Opening Balances
       if (data.openingBalances && typeof data.openingBalances === 'object') {
         for (const [bank, amount] of Object.entries(data.openingBalances)) {
           if (typeof amount === 'number') {
@@ -485,7 +638,7 @@ class DatabaseService {
         }
       }
 
-      // 2. Restore Sender Bank Map
+      // 2. Sender Bank Map
       if (data.senderBankMap && typeof data.senderBankMap === 'object') {
         for (const [sender, bankName] of Object.entries(data.senderBankMap)) {
           if (typeof bankName === 'string') {
@@ -494,7 +647,7 @@ class DatabaseService {
         }
       }
 
-      // 3. Restore Counterparty Tags
+      // 3. Counterparty Tags
       if (data.counterpartyTags && typeof data.counterpartyTags === 'object') {
         for (const [cp, tg] of Object.entries(data.counterpartyTags)) {
           if (typeof tg === 'string') {
@@ -503,7 +656,7 @@ class DatabaseService {
         }
       }
 
-      // 4. Restore SMS Overrides
+      // 4. Overrides
       if (data.overrides && typeof data.overrides === 'object') {
         for (const [smsId, ov] of Object.entries(data.overrides as Record<string, any>)) {
           if (ov && typeof ov === 'object') {
@@ -518,31 +671,81 @@ class DatabaseService {
         }
       }
 
-      // 5. Restore Settings
+      // 5. Settings
       if (data.settings && typeof data.settings === 'object') {
-        await this.saveSettings({
-          serverUrl: data.settings.serverUrl,
-          secretKey: data.settings.secretKey,
-          httpMethod: data.settings.httpMethod,
-          retryIntervalSeconds: data.settings.retryIntervalSeconds,
-          mode: data.settings.mode,
-          allowedSenders: data.settings.allowedSenders,
-        });
+        const currentSettings = await this.getSettings();
+        const settingsToSave: Partial<AppSettings> = {
+          serverUrl: data.settings.serverUrl || currentSettings.serverUrl,
+          httpMethod: data.settings.httpMethod || currentSettings.httpMethod,
+          retryIntervalSeconds: data.settings.retryIntervalSeconds || currentSettings.retryIntervalSeconds,
+          mode: data.settings.mode || currentSettings.mode,
+          allowedSenders: Array.isArray(data.settings.allowedSenders) ? data.settings.allowedSenders : currentSettings.allowedSenders,
+        };
+
+        // If backup contained a non-empty secretKey, or if in replace mode and key is present
+        if (data.settings.secretKey && data.settings.secretKey.trim().length > 0) {
+          settingsToSave.secretKey = data.settings.secretKey;
+        } else if (mode === 'replace' && (!data.settings.secretKey || data.settings.secretKey === '')) {
+          // If backup omitted secret key, preserve existing local key to prevent accidental key wipeout
+          settingsToSave.secretKey = currentSettings.secretKey;
+        }
+
+        await this.saveSettings(settingsToSave);
       }
 
-      // 6. Restore Messages if in local storage simulation
-      if (Array.isArray(data.messages)) {
+      // 6. Custom Accounts & Withdrawals
+      if (Array.isArray(data.customAccounts)) {
+        try {
+          localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(data.customAccounts));
+        } catch {}
+      }
+
+      if (Array.isArray(data.withdrawals)) {
+        try {
+          localStorage.setItem(LOCAL_STORAGE_KEYS.WITHDRAWALS, JSON.stringify(data.withdrawals));
+        } catch {}
+      }
+
+      // 7. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates: same sender + body + timestamp)
+      if (Array.isArray(data.messages) && data.messages.length > 0) {
+        const existingMessages = await getNativeMessages();
+
+        // Create deduplication set for fast lookup
+        const existingKeySet = new Set<string>();
+        for (const em of existingMessages) {
+          const bodyNorm = (em.body || '').trim();
+          existingKeySet.add(`${(em.sender || '').toLowerCase()}|${bodyNorm}`);
+        }
+
         for (const m of data.messages) {
-          if (m && m.sender && m.body) {
-            await this.insertTestSms(m.sender, m.body);
-            restoredCount++;
+          if (!m || !m.sender || !m.body) continue;
+          const key = `${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}`;
+
+          if (mode === 'merge' && existingKeySet.has(key)) {
+            // Duplicate row, skip
+            continue;
           }
+
+          await this.insertTestSms(m.sender, m.body);
+          existingKeySet.add(key);
+          restoredPaymentsCount++;
         }
       }
 
-      return { success: true, count: restoredCount || Object.keys(data.overrides || {}).length };
+      return {
+        success: true,
+        count: restoredPaymentsCount || inspection.paymentsCount,
+        banksCount: inspection.banksCount,
+        tagsCount: inspection.tagsCount,
+      };
     } catch (e: any) {
-      return { success: false, count: 0, error: e?.message || 'Failed to parse backup JSON' };
+      return {
+        success: false,
+        count: 0,
+        banksCount: 0,
+        tagsCount: 0,
+        error: e?.message || 'Failed restoring backup data',
+      };
     }
   }
 }

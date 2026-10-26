@@ -15,7 +15,11 @@ import android.provider.Settings;
 import android.webkit.JavascriptInterface;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import com.getcapacitor.BridgeActivity;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -441,6 +445,103 @@ public class MainActivity extends BridgeActivity {
             try {
                 SQLiteDatabase db = Db.get(activity).getWritableDatabase();
                 return db.delete("sender_bank_map", "sender=?", new String[]{sender}) > 0;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String getServerResults() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getReadableDatabase();
+                Cursor q = db.rawQuery("SELECT sms_id, http_code, status, ref, reason, raw, at FROM server_result", null);
+                JSONObject obj = new JSONObject();
+                while (q.moveToNext()) {
+                    long id = q.getLong(0);
+                    JSONObject row = new JSONObject();
+                    row.put("smsId", id);
+                    row.put("httpCode", q.getInt(1));
+                    row.put("status", q.isNull(2) ? "Unknown" : q.getString(2));
+                    row.put("ref", q.isNull(3) ? "" : q.getString(3));
+                    row.put("reason", q.isNull(4) ? "" : q.getString(4));
+                    row.put("raw", q.isNull(5) ? "" : q.getString(5));
+                    row.put("at", q.getLong(6));
+                    obj.put(String.valueOf(id), row);
+                }
+                q.close();
+                return obj.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean saveServerResult(long smsId, int httpCode, String status, String ref, String reason, String raw) {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.execSQL("INSERT OR REPLACE INTO server_result (sms_id, http_code, status, ref, reason, raw, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        new Object[]{smsId, httpCode, status != null ? status : "Unknown", ref != null ? ref : "", reason != null ? reason : "", raw != null ? raw : "", System.currentTimeMillis()});
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String saveFileNative(String filename, String mimeType, String content) {
+            JSONObject res = new JSONObject();
+            try {
+                File dir = activity.getExternalFilesDir(null);
+                if (dir == null) dir = activity.getFilesDir();
+                File file = new File(dir, filename);
+                FileOutputStream fos = new FileOutputStream(file);
+                byte[] bytes = content.getBytes("UTF-8");
+                fos.write(bytes);
+                fos.flush();
+                fos.close();
+
+                // Read back verification (Requirement E2)
+                long size = file.length();
+                if (size == 0) {
+                    res.put("success", false);
+                    res.put("error", "File was written with 0 bytes");
+                    return res.toString();
+                }
+
+                res.put("success", true);
+                res.put("path", file.getAbsolutePath());
+                res.put("bytes", size);
+                return res.toString();
+            } catch (Exception e) {
+                try {
+                    res.put("success", false);
+                    res.put("error", String.valueOf(e.getMessage()));
+                } catch (Exception ignored) {}
+                return res.toString();
+            }
+        }
+
+        @JavascriptInterface
+        public boolean shareFileNative(String filename, String mimeType, String content) {
+            try {
+                File cacheDir = new File(activity.getCacheDir(), "shared");
+                if (!cacheDir.exists()) cacheDir.mkdirs();
+                File file = new File(cacheDir, filename);
+                FileOutputStream fos = new FileOutputStream(file);
+                fos.write(content.getBytes("UTF-8"));
+                fos.flush();
+                fos.close();
+
+                Uri contentUri = FileProvider.getUriForFile(activity, activity.getPackageName() + ".fileprovider", file);
+                Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                shareIntent.setType(mimeType != null ? mimeType : "*/*");
+                shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri);
+                shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                Intent chooser = Intent.createChooser(shareIntent, "Share Backup via");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(chooser);
+                return true;
             } catch (Exception e) {
                 return false;
             }

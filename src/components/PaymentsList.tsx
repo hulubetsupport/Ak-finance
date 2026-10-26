@@ -22,7 +22,8 @@ import {
   Receipt,
   Banknote,
   ArrowLeftRight,
-  Tag as TagIcon
+  Tag as TagIcon,
+  ExternalLink
 } from 'lucide-react';
 import { getBankBrand } from '../constants/bankBrands.ts';
 
@@ -128,13 +129,74 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     }
   };
 
-  const getSyncStatusBadge = (status: PaymentRecord['syncStatus']) => {
-    switch (status) {
+  const getSyncStatusBadge = (item: PaymentRecord) => {
+    const sr = item.serverResult;
+    if (sr) {
+      if (sr.resolving) {
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200" title="The server is fetching the CBE transaction number">
+            <Clock size={11} className="text-blue-600 animate-spin" />
+            <span>FT pending</span>
+          </span>
+        );
+      }
+      if (sr.status === 'Saved') {
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+            <CheckCircle2 size={11} className="text-emerald-600" />
+            <span>Saved ✓</span>
+          </span>
+        );
+      }
+      if (sr.status === 'Duplicate') {
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-300">
+            <span>Duplicate</span>
+          </span>
+        );
+      }
+      if (sr.status === 'Ignored') {
+        return (
+          <div className="flex items-center gap-1">
+            <span
+              className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-300"
+              title={sr.reason ? `Server did NOT save this: ${sr.reason}` : 'Server did NOT save this'}
+            >
+              <AlertTriangle size={11} className="text-amber-600" />
+              <span className="truncate max-w-[130px]">
+                {sr.reason ? `Ignored: ${sr.reason}` : 'Ignored'}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleManualRetry(item);
+              }}
+              disabled={retryingId === item.id}
+              className="px-1.5 py-0.5 text-[9.5px] font-bold bg-amber-100 text-amber-900 rounded border border-amber-300 hover:bg-amber-200 disabled:opacity-50"
+            >
+              {retryingId === item.id ? '...' : 'Retry'}
+            </button>
+          </div>
+        );
+      }
+      if (sr.httpCode === 200 && sr.status === 'Unknown') {
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200" title="HTTP 200 with non-JSON reply">
+            <span>Unknown reply</span>
+          </span>
+        );
+      }
+    }
+
+    // Default status handling when no explicit server_result reply yet
+    switch (item.syncStatus) {
       case 'sent':
         return (
           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
             <CheckCircle2 size={11} className="text-emerald-600" />
-            <span>{t.statusSynced}</span>
+            <span>Saved ✓</span>
           </span>
         );
       case 'pending':
@@ -146,10 +208,23 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         );
       case 'failed':
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200">
-            <AlertCircle size={11} className="text-rose-600" />
-            <span>{t.statusFailed}</span>
-          </span>
+          <div className="flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200">
+              <AlertCircle size={11} className="text-rose-600" />
+              <span>{t.statusFailed}</span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleManualRetry(item);
+              }}
+              disabled={retryingId === item.id}
+              className="px-1.5 py-0.5 text-[9.5px] font-bold bg-rose-100 text-rose-900 rounded border border-rose-300 hover:bg-rose-200 disabled:opacity-50"
+            >
+              {retryingId === item.id ? '...' : 'Retry'}
+            </button>
+          </div>
         );
       case 'local':
       default:
@@ -410,8 +485,20 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                   </div>
                 )}
 
-                <div className="mt-1 flex items-center justify-end">
-                  {getSyncStatusBadge(item.syncStatus)}
+                <div className="mt-1 flex items-center justify-end flex-wrap gap-1">
+                  {getSyncStatusBadge(item)}
+                  {item.v2Code && (
+                    <a
+                      href={`https://mbreciept.cbe.com.et/${item.v2Code}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="inline-flex items-center gap-0.5 text-[9.5px] font-bold text-[#14503F] hover:underline bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shadow-2xs"
+                    >
+                      <ExternalLink size={9} />
+                      <span>Open receipt</span>
+                    </a>
+                  )}
                 </div>
               </div>
             </div>
@@ -657,6 +744,55 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">Note:</span>
                     <span className="font-medium text-slate-800">{selectedPayment.note}</span>
+                  </div>
+                )}
+
+                {selectedPayment.reference && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Ref / FT Number:</span>
+                    <span className="font-mono font-bold text-slate-900 select-all">{selectedPayment.reference}</span>
+                  </div>
+                )}
+
+                {selectedPayment.v2Code && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">CBE v2 Link:</span>
+                    <a
+                      href={`https://mbreciept.cbe.com.et/${selectedPayment.v2Code}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-[#14503F] hover:underline bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md"
+                    >
+                      <ExternalLink size={11} />
+                      <span>Open receipt ({selectedPayment.v2Code})</span>
+                    </a>
+                  </div>
+                )}
+
+                {selectedPayment.serverResult && (
+                  <div className="p-2.5 rounded-xl bg-white border border-slate-200 space-y-1 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 font-medium">Server Reply:</span>
+                      <span className={`font-bold ${
+                        selectedPayment.serverResult.status === 'Saved' 
+                          ? 'text-emerald-700' 
+                          : selectedPayment.serverResult.status === 'Ignored' 
+                            ? 'text-amber-800' 
+                            : 'text-slate-700'
+                      }`}>
+                        {selectedPayment.serverResult.status} (HTTP {selectedPayment.serverResult.httpCode})
+                      </span>
+                    </div>
+                    {selectedPayment.serverResult.reason && (
+                      <p className="text-slate-600 font-mono text-[10px]">
+                        Reason: {selectedPayment.serverResult.reason}
+                      </p>
+                    )}
+                    {selectedPayment.serverResult.resolving && (
+                      <span className="inline-block text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200 font-semibold">
+                        FT resolution in progress on server
+                      </span>
+                    )}
                   </div>
                 )}
 

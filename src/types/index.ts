@@ -2,7 +2,31 @@ export type SyncStatus = 'sent' | 'pending' | 'failed' | 'local';
 
 export type PaymentType = 'received' | 'sent' | 'unknown';
 
-export type PaymentCategory = 'transfer' | 'airtime' | 'data' | 'bill' | 'cash' | 'other';
+export type PaymentCategory = 
+  | 'received' 
+  | 'transfer' 
+  | 'airtime' 
+  | 'data' 
+  | 'payment' 
+  | 'bill' 
+  | 'cash' 
+  | 'atm-card' 
+  | 'other';
+
+export interface ServerResultRecord {
+  smsId: number | string;
+  httpCode: number;
+  status: 'Saved' | 'Duplicate' | 'Ignored' | 'Unknown';
+  ref?: string;
+  reason?: string;
+  raw?: string;
+  at: number;
+  resolving?: boolean;
+  v2?: string;
+  bank?: string;
+  type?: string;
+  amount?: number;
+}
 
 export type BankName = 
   | 'Telebirr'
@@ -27,13 +51,17 @@ export interface PaymentRecord {
   category?: PaymentCategory;
   amount: number;
   amountCents?: number;
+  amountSantim?: number;
   fee?: number;
   feeCents?: number;
   currency: string;
   counterparty: string;
   reference: string;
+  ftNumber?: string;
+  v2Code?: string;
   accountNumber?: string;
   balance?: number;
+  balanceSantim?: number;
   extractedBalance?: number;
   rawMessage: string;
   timestamp: number;
@@ -43,6 +71,7 @@ export interface PaymentRecord {
   lastRetryAt?: number;
   errorMessage?: string;
   serverResponse?: string;
+  serverResult?: ServerResultRecord;
   source: 'sms' | 'manual' | 'simulated';
   isDuplicate?: boolean;
   note?: string;

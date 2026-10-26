@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from './services/db.ts';
 import { PaymentRecord, Account, WithdrawalRecord, AppSettings } from './types/index.ts';
 import { translations } from './utils/i18n.ts';
@@ -170,6 +170,12 @@ export default function App() {
     currentTab,
   ]);
 
+  // Requirement B: Header amber pill when recent SMS was Ignored (called unconditionally before early returns)
+  const hasIgnoredRecentPayment = useMemo(() => {
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    return payments.some(p => p.timestamp > dayAgo && p.serverResult?.status === 'Ignored');
+  }, [payments]);
+
   if (!settings) {
     return (
       <div className="min-h-screen bg-[#F4F7F5] flex items-center justify-center p-4">
@@ -283,6 +289,7 @@ export default function App() {
       <Header
         settings={settings}
         nativeStatus={nativeStatus}
+        hasIgnoredRecentPayment={hasIgnoredRecentPayment}
         onToggleHideBalances={handleToggleHideBalances}
         onToggleLanguage={handleToggleLanguage}
         onOpenNotifications={() => setCurrentTab('payments')}
@@ -584,6 +591,7 @@ export default function App() {
         isOpen={showVerifyModal}
         onClose={() => setShowVerifyModal(false)}
         payments={payments}
+        settings={settings}
       />
 
       {/* About & Help Modal */}

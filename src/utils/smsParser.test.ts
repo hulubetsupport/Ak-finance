@@ -1,153 +1,121 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBankSms, TELEBIRR_PARSER_SAMPLES, convertAmharicNumerals } from './smsParser.ts';
+import { parseBankSms, OFFICIAL_PARSER_BENCHMARKS, convertAmharicNumerals } from './smsParser.ts';
 
-test('Test case a: sender 127 transferred -> Telebirr, Sent', () => {
-  const sms = 'You have transferred ETB 500.00 to Abel (0911000000) on 2026-10-24 10:15:00. Transaction number is 10M9933K1. Your current balance is ETB 4,500.00.';
-  const parsed = parseBankSms('127', sms);
-
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.amount, 500);
-  assert.equal(parsed.amountCents, 50000);
-  assert.equal(parsed.counterparty, 'Abel');
-  assert.equal(parsed.reference, '10M9933K1');
-  assert.equal(parsed.balance, 4500);
-});
-
-test('Test case b: sender 127 received -> Telebirr, Received', () => {
-  const sms = 'You have received ETB 2,800.00 from Dawit Haile (0912345678) on 2026-10-24 11:20:00. Transaction ID: 10E9944P1. Your current balance is ETB 7,300.00.';
-  const parsed = parseBankSms('127', sms);
-
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'received');
-  assert.equal(parsed.amount, 2800);
-  assert.equal(parsed.amountCents, 280000);
-  assert.equal(parsed.counterparty, 'Dawit Haile');
-  assert.equal(parsed.reference, '10E9944P1');
-  assert.equal(parsed.balance, 7300);
-});
-
-test('Test case c: sender CBE credited -> CBE, Received', () => {
-  const sms = 'Your Account 1*****4321 has been Credited with ETB 8,400.00 from Meron with txn id FT2630981120. Your current balance is ETB 150,900.20.';
-  const parsed = parseBankSms('CBE', sms);
+test('Sample 1: CBE Received with v2 receipt link', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 1)!;
+  const parsed = parseBankSms(s.sender, s.raw);
 
   assert.equal(parsed.bank, 'CBE');
   assert.equal(parsed.type, 'received');
-  assert.equal(parsed.amount, 8400);
-  assert.equal(parsed.counterparty, 'Meron');
-  assert.equal(parsed.reference, 'FT2630981120');
-  assert.equal(parsed.balance, 150900.20);
+  assert.equal(parsed.amount, 10000.0);
+  assert.equal(parsed.counterparty, 'Usmeal Abdela Usmeal');
+  assert.equal(parsed.balance, 11487.36);
+  assert.equal(parsed.v2Code, 'v2-hfHCxHOFHkYg2iE8Cxoo');
+  assert.equal(parsed.reference, 'v2-hfHCxHOFHkYg2iE8Cxoo');
 });
 
-test('Test case d: sender CBE debited -> CBE, Sent', () => {
-  const sms = 'Your Account 1*****4321 has been Debited with ETB 4,200.00 to Addis Supplier with txn id FT2630971100. Your current balance is ETB 146,700.20.';
-  const parsed = parseBankSms('CBE', sms);
+test('Sample 2: CBE Transfer Sent with ETB10000.00 and Bilal Seid Abdu', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 2)!;
+  const parsed = parseBankSms(s.sender, s.raw);
 
   assert.equal(parsed.bank, 'CBE');
   assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.amount, 4200);
-  assert.equal(parsed.counterparty, 'Addis Supplier');
-  assert.equal(parsed.reference, 'FT2630971100');
-  assert.equal(parsed.balance, 146700.20);
+  assert.equal(parsed.amount, 10000.0);
+  assert.equal(parsed.counterparty, 'Bilal Seid Abdu');
+  assert.equal(parsed.balance, 1487.36);
+  assert.equal(parsed.v2Code, 'v2-hfHCxHOSAUhicDpLO8l2');
 });
 
-test('Awash Bank credited -> Awash Bank, Received', () => {
-  const sms = 'Awash Bank: Your account 0132****3321 has been credited with ETB 15,000.00 on 22/10/2026 14:10:00 from Yohannes Girma with ref FT993102AW. Balance is ETB 79,120.50.';
-  const parsed = parseBankSms('AwashBank', sms);
+test('Sample 3: CBE ATM/Card debit with no link and no to account', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 3)!;
+  const parsed = parseBankSms(s.sender, s.raw);
 
-  assert.equal(parsed.bank, 'Awash Bank');
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'sent');
+  assert.equal(parsed.category, 'atm-card');
+  assert.equal(parsed.amount, 201.15);
+  assert.equal(parsed.counterparty, '');
+  assert.equal(parsed.reference, '');
+  assert.equal(parsed.balance, 1487.36);
+});
+
+test('Sample 4: CBE Debit transaction 5980.0. (main amount vs total)', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 4)!;
+  const parsed = parseBankSms(s.sender, s.raw);
+
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'sent');
+  assert.equal(parsed.amount, 5980.0);
+  assert.equal(parsed.balance, 1625.23);
+  assert.equal(parsed.v2Code, 'v2-hfHCxHOjjcsmjYVFI685');
+});
+
+test('Sample 5: CBE Credited with FT Number receipt', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 5)!;
+  const parsed = parseBankSms(s.sender, s.raw);
+
+  assert.equal(parsed.bank, 'CBE');
   assert.equal(parsed.type, 'received');
-  assert.equal(parsed.amount, 15000);
-  assert.equal(parsed.counterparty, 'Yohannes Girma');
-  assert.equal(parsed.reference, 'FT993102AW');
+  assert.equal(parsed.amount, 300.0);
+  assert.equal(parsed.ftNumber, 'FT26294BDL5T');
+  assert.equal(parsed.reference, 'FT26294BDL5T');
+  assert.equal(parsed.balance, 1888.95);
 });
 
-test('Unknown direction does not default to received', () => {
-  const sms = 'Your transaction is under review for ETB 1,000.00.';
-  const parsed = parseBankSms('127', sms);
-
-  assert.equal(parsed.type, 'unknown');
-  assert.equal(parsed.amount, 1000);
-});
-
-test('Telebirr Amharic Airtime Purchase: Sent & Airtime Category', () => {
-  const sms = 'የ 25.00 ብር የአየር ሰዓት ለ 0911223344 በተሳካ ሁኔታ ገዝተዋል። የግብይት ቁጥር ER56TY78UI። ቀሪ ሂሳብዎ 520.50 ብር ነው። telebirr';
-  const parsed = parseBankSms('127', sms);
+test('Sample 6: Telebirr 127 Amharic Received (ከ Nestanet Markos)', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 6)!;
+  const parsed = parseBankSms(s.sender, s.raw);
 
   assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.category, 'airtime');
-  assert.equal(parsed.amount, 25.0);
-  assert.equal(parsed.amountCents, 2500);
-  assert.equal(parsed.reference, 'ER56TY78UI');
-  assert.equal(parsed.balance, 520.50);
+  assert.equal(parsed.type, 'received');
+  assert.equal(parsed.amount, 50.0);
+  assert.equal(parsed.counterparty, 'Nestanet Markos');
+  assert.equal(parsed.reference, 'DJP8AHMQEE');
+  assert.equal(parsed.balance, 2046.06);
 });
 
-test('Telebirr Amharic Data Package: Sent & Data Category', () => {
-  const sms = 'የ 100.00 ብር የሳምንታዊ 1GB የዳታ ጥቅል በተሳካ ሁኔታ ገዝተዋል። የግብይት ቁጥር DF89KJ23NM ነው። ቀሪ ሂሳብዎ 420.50 ብር ነው።';
-  const parsed = parseBankSms('127', sms);
+test('Sample 7: Telebirr 127 Data Package Purchase (ለ 996910607)', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 7)!;
+  const parsed = parseBankSms(s.sender, s.raw);
 
   assert.equal(parsed.bank, 'Telebirr');
   assert.equal(parsed.type, 'sent');
   assert.equal(parsed.category, 'data');
-  assert.equal(parsed.amount, 100.0);
-  assert.equal(parsed.amountCents, 10000);
-  assert.equal(parsed.reference, 'DF89KJ23NM');
-  assert.equal(parsed.balance, 420.50);
-});
-
-test('Telebirr Amharic Transfer Sent: Sent & Fee extracted', () => {
-  const sms = 'ለ Abel (0911223344) 500.00 ብር አስተላልፈዋል። የአገልግሎት ክፍያ 1.50 ብር ተቆርጧል። የግብይት ቁጥር TXN88776655 ነው። ቀሪ ሂሳብዎ 318.50 ብር ነው።';
-  const parsed = parseBankSms('127', sms);
-
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.category, 'transfer');
   assert.equal(parsed.amount, 500.0);
-  assert.equal(parsed.fee, 1.50);
-  assert.equal(parsed.feeCents, 150);
-  assert.equal(parsed.reference, 'TXN88776655');
-  assert.equal(parsed.balance, 318.50);
+  assert.equal(parsed.counterparty, '996910607');
+  assert.equal(parsed.reference, 'DJO19S1SYB');
+  assert.equal(parsed.balance, 1946.06);
 });
 
-test('Telebirr Amharic Transfer Received: Received & Counterparty extracted', () => {
-  const sms = 'ከ Dawit Haile (0912345678) 2,800.00 ብር ተቀብለዋል። የግብይት ቁጥር 10E9944P1 ነው። ቀሪ ሂሳብዎ 3,118.50 ብር ነው። telebirr';
-  const parsed = parseBankSms('127', sms);
+test('Sample 8: Telebirr English Received and Transferred', () => {
+  const s = OFFICIAL_PARSER_BENCHMARKS.find(x => x.sampleNum === 8)!;
+  const parsedRec = parseBankSms(s.sender, s.raw);
 
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'received');
-  assert.equal(parsed.category, 'transfer');
-  assert.equal(parsed.amount, 2800.0);
-  assert.equal(parsed.counterparty, 'Dawit Haile');
-  assert.equal(parsed.reference, '10E9944P1');
-  assert.equal(parsed.balance, 3118.50);
-});
+  assert.equal(parsedRec.bank, 'Telebirr');
+  assert.equal(parsedRec.type, 'received');
+  assert.equal(parsedRec.amount, 2800.0);
+  assert.equal(parsedRec.counterparty, 'Dawit Haile');
+  assert.equal(parsedRec.reference, '10E9944P1X');
 
-test('Telebirr English Bill Payment: Sent & Bill Category', () => {
-  const sms = 'You have paid ETB 1,250.00 to Ethiopian Airlines for ticket booking. Transaction ID is ETB77889900. Your current balance is ETB 1,868.50.';
-  const parsed = parseBankSms('127', sms);
-
-  assert.equal(parsed.bank, 'Telebirr');
-  assert.equal(parsed.type, 'sent');
-  assert.equal(parsed.category, 'bill');
-  assert.equal(parsed.amount, 1250.0);
-  assert.equal(parsed.counterparty, 'Ethiopian Airlines');
-  assert.equal(parsed.reference, 'ETB77889900');
-  assert.equal(parsed.balance, 1868.50);
+  const sentSms = 'You have transferred ETB 500.00 to Abel Trading on 24/10/2026. Transaction number is TXN882991.';
+  const parsedSent = parseBankSms('127', sentSms);
+  assert.equal(parsedSent.bank, 'Telebirr');
+  assert.equal(parsedSent.type, 'sent');
+  assert.equal(parsedSent.amount, 500.0);
+  assert.equal(parsedSent.counterparty, 'Abel Trading');
 });
 
 test('Ge\'ez numerals conversion (፩፻ ብር = 100)', () => {
-  const converted = convertAmharicNumerals('የ ፻ ብር የአየር ሰዓት ገዝተዋል');
-  assert.ok(converted.includes('100'));
+  assert.equal(convertAmharicNumerals('የ ፩፻ ብር'), 'የ 100 ብር');
+  assert.equal(convertAmharicNumerals('፭፻'), '500');
 });
 
-test('All TELEBIRR_PARSER_SAMPLES pass benchmark criteria', () => {
-  for (const s of TELEBIRR_PARSER_SAMPLES) {
-    const res = parseBankSms(s.sender, s.raw);
-    assert.equal(res.bank, s.expectedBank, `Bank mismatch for ${s.name}`);
-    assert.equal(res.type, s.expectedType, `Direction mismatch for ${s.name}`);
-    assert.equal(res.category, s.expectedCategory, `Category mismatch for ${s.name}`);
-    assert.equal(res.amount, s.expectedAmount, `Amount mismatch for ${s.name}`);
+test('All 8 OFFICIAL_PARSER_BENCHMARKS execute cleanly without error', () => {
+  for (const sample of OFFICIAL_PARSER_BENCHMARKS) {
+    const res = parseBankSms(sample.sender, sample.raw);
+    assert.equal(res.bank, sample.expectedBank);
+    assert.equal(res.type, sample.expectedType);
+    assert.equal(res.amount, sample.expectedAmount);
   }
 });

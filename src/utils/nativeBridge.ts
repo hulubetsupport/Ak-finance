@@ -451,3 +451,131 @@ export const deleteNativeSenderBankMap = async (sender: string): Promise<boolean
     return false;
   }
 };
+
+export interface NativeServerResult {
+  smsId: number;
+  httpCode: number;
+  status: 'Saved' | 'Duplicate' | 'Ignored' | 'Unknown';
+  ref?: string;
+  reason?: string;
+  raw?: string;
+  at: number;
+}
+
+export const getNativeServerResults = async (): Promise<Record<string, NativeServerResult>> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getServerResults) {
+    try {
+      const raw = (window as any).AndroidBridge.getServerResults();
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      console.warn('Failed reading native server results:', e);
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem('ak_server_results_sim');
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+};
+
+export const saveNativeServerResult = async (
+  smsId: number,
+  httpCode: number,
+  status: string,
+  ref: string,
+  reason: string,
+  raw: string
+): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveServerResult) {
+    return !!(window as any).AndroidBridge.saveServerResult(smsId, httpCode, status, ref, reason, raw);
+  }
+
+  try {
+    const current = await getNativeServerResults();
+    current[String(smsId)] = {
+      smsId,
+      httpCode,
+      status: status as any,
+      ref,
+      reason,
+      raw,
+      at: Date.now(),
+    };
+    localStorage.setItem('ak_server_results_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export interface NativeFileSaveResult {
+  success: boolean;
+  path?: string;
+  bytes?: number;
+  error?: string;
+}
+
+export const saveNativeFile = async (
+  filename: string,
+  mimeType: string,
+  content: string
+): Promise<NativeFileSaveResult> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveFileNative) {
+    try {
+      const raw = (window as any).AndroidBridge.saveFileNative(filename, mimeType, content);
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Native save failed' };
+    }
+  }
+
+  // Web fallback using blob download + verified length check
+  try {
+    const blob = new Blob([content], { type: mimeType });
+    if (blob.size === 0) {
+      return { success: false, error: 'Generated empty file (0 bytes)' };
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return { success: true, path: filename, bytes: blob.size };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Download failed' };
+  }
+};
+
+export const shareNativeFile = async (
+  filename: string,
+  mimeType: string,
+  content: string
+): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.shareFileNative) {
+    try {
+      return !!(window as any).AndroidBridge.shareFileNative(filename, mimeType, content);
+    } catch {
+      return false;
+    }
+  }
+
+  // Web fallback: Web Share API if available, or copy to clipboard
+  try {
+    if (navigator.share) {
+      const file = new File([content], filename, { type: mimeType });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return true;
+      }
+    }
+    await navigator.clipboard.writeText(content);
+    return true;
+  } catch {
+    return false;
+  }
+};
+

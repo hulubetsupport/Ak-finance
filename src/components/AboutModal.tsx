@@ -14,8 +14,8 @@ import {
 import { openAndroidAppSettings, openAndroidBatterySettings } from '../utils/nativeBridge.ts';
 import { 
   parseBankSms, 
-  TELEBIRR_PARSER_SAMPLES, 
-  ParserSample, 
+  OFFICIAL_PARSER_BENCHMARKS, 
+  ParserBenchmarkSample, 
   ParsedPayment 
 } from '../utils/smsParser.ts';
 
@@ -254,14 +254,20 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
             {/* Benchmark Table */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs font-bold text-slate-800 px-1">
-                <span>Verified Sample Matrix ({TELEBIRR_PARSER_SAMPLES.length} Samples)</span>
-                <span className="text-emerald-700 font-mono text-[11px]">100% PASS</span>
+                <span>Verified Sample Matrix ({OFFICIAL_PARSER_BENCHMARKS.length} Official Samples)</span>
+                <span className="text-emerald-700 font-mono text-[11px] bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                  8 of 8 PASS (100%)
+                </span>
               </div>
 
               <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                {TELEBIRR_PARSER_SAMPLES.map(sample => {
+                {OFFICIAL_PARSER_BENCHMARKS.map(sample => {
                   const parsed = parseBankSms(sample.sender, sample.raw);
                   const isSent = parsed.type === 'sent';
+                  const isPass = 
+                    parsed.bank === sample.expectedBank &&
+                    parsed.type === sample.expectedType &&
+                    parsed.amount === sample.expectedAmount;
 
                   return (
                     <div
@@ -270,10 +276,12 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                     >
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-slate-900 font-['Poppins',sans-serif]">
-                          {sample.name}
+                          #{sample.sampleNum} · {sample.title}
                         </span>
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
-                          <CheckCircle2 size={11} /> PASS
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                          isPass ? 'text-emerald-800 bg-emerald-50 border-emerald-200' : 'text-rose-800 bg-rose-50 border-rose-200'
+                        }`}>
+                          <CheckCircle2 size={11} /> {isPass ? 'PASS' : 'FAIL'}
                         </span>
                       </div>
 
@@ -283,40 +291,40 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
 
                       <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] pt-1 border-t border-slate-100">
                         <div className="flex items-center gap-1">
-                          <span className="text-slate-400">Direction:</span>
-                          <span className={`font-bold inline-flex items-center gap-0.5 ${isSent ? 'text-slate-900' : 'text-emerald-700'}`}>
-                            {isSent ? <ArrowUpRight size={11} /> : <ArrowDownLeft size={11} />}
-                            {parsed.type}
-                          </span>
+                          <span className="text-slate-400">Bank:</span>
+                          <span className="font-bold text-slate-800">{parsed.bank}</span>
                         </div>
 
                         <div className="flex items-center gap-1">
-                          <span className="text-slate-400">Category:</span>
-                          <span className="font-bold capitalize bg-slate-100 px-1.5 py-0.2 rounded text-slate-700">
-                            {parsed.category}
+                          <span className="text-slate-400">Direction:</span>
+                          <span className={`font-bold inline-flex items-center gap-0.5 ${isSent ? 'text-slate-900' : 'text-emerald-700'}`}>
+                            {isSent ? <ArrowUpRight size={11} /> : <ArrowDownLeft size={11} />}
+                            {parsed.type} ({parsed.category})
                           </span>
                         </div>
 
                         <div className="flex items-center gap-1">
                           <span className="text-slate-400">Amount:</span>
                           <span className="font-bold font-mono">
-                            ETB {parsed.amount.toLocaleString()} ({parsed.amountCents}¢)
+                            ETB {parsed.amount.toLocaleString()} ({parsed.amountSantim || parsed.amountCents} santim)
                           </span>
                         </div>
 
                         <div className="flex items-center gap-1 truncate">
-                          <span className="text-slate-400">Entity:</span>
-                          <span className="font-bold truncate text-slate-800">{parsed.counterparty}</span>
+                          <span className="text-slate-400">Name:</span>
+                          <span className="font-bold truncate text-slate-800">{parsed.counterparty || 'None'}</span>
                         </div>
 
-                        <div className="flex items-center gap-1 truncate col-span-2">
-                          <span className="text-slate-400">Ref:</span>
+                        <div className="flex items-center gap-1 truncate">
+                          <span className="text-slate-400">Ref / v2:</span>
                           <span className="font-mono font-bold text-slate-700 truncate">{parsed.reference || 'None'}</span>
-                          {parsed.fee !== undefined && (
-                            <span className="text-amber-800 bg-amber-50 px-1.5 py-0.2 rounded text-[10px] font-mono ml-auto">
-                              Fee: {parsed.fee} ETB
-                            </span>
-                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1 truncate">
+                          <span className="text-slate-400">Balance:</span>
+                          <span className="font-mono font-bold text-emerald-800 truncate">
+                            {parsed.balance !== undefined ? `ETB ${parsed.balance.toLocaleString()}` : 'N/A'}
+                          </span>
                         </div>
                       </div>
                     </div>

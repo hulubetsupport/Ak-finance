@@ -7,6 +7,7 @@ import { translations } from '../utils/i18n.ts';
 interface HeaderProps {
   settings: AppSettings;
   nativeStatus: NativeStatus;
+  hasIgnoredRecentPayment?: boolean;
   onToggleHideBalances: () => void;
   onToggleLanguage: () => void;
   onOpenNotifications: () => void;
@@ -17,6 +18,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   settings,
   nativeStatus,
+  hasIgnoredRecentPayment = false,
   onToggleHideBalances,
   onToggleLanguage,
   onOpenNotifications,
@@ -29,12 +31,21 @@ export const Header: React.FC<HeaderProps> = ({
   // Header pill rule:
   // "Connected" (green) ONLY if smsGranted && url set && pending==0 && lastCode==200;
   // amber "n pending"; red "Not set up" if permission or URL missing; grey in Local mode.
+  // Amber if a recent payment was Ignored by the server (Part B).
   const getStatusDisplay = () => {
     if (settings.mode === 'local') {
       return {
         label: t.localMode,
         dotClass: 'bg-slate-400',
         badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
+      };
+    }
+
+    if (hasIgnoredRecentPayment) {
+      return {
+        label: isAm ? 'ክፍያ ተትቷል (Ignored)' : 'Server Ignored SMS',
+        dotClass: 'bg-amber-500 animate-pulse',
+        badgeClass: 'bg-amber-50 text-amber-900 border-amber-300 font-bold',
       };
     }
 

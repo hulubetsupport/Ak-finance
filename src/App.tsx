@@ -5,7 +5,8 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from './services/db.ts';
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings } from './types/index.ts';
+import { PaymentRecord, Account, WithdrawalRecord, AppSettings, TimeRange } from './types/index.ts';
+import { filterPaymentsByTimeRange } from './utils/timeRange.ts';
 import { translations } from './utils/i18n.ts';
 import { Header } from './components/Header.tsx';
 import { AccountsCardStack } from './components/AccountsCardStack.tsx';
@@ -54,6 +55,7 @@ export default function App() {
 
   // Filter state
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [directionFilter, setDirectionFilter] = useState<'all' | 'received' | 'sent'>('all');
   const [currentMonthIndex, setCurrentMonthIndex] = useState(9); // October
   const months = ['January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026', 'July 2026', 'August 2026', 'September 2026', 'October 2026', 'November 2026', 'December 2026'];
 
@@ -72,6 +74,41 @@ export default function App() {
   const [showVerifyModal, setShowVerifyModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
 
+  // Time Range (Requirement D)
+  const [timeRange, setTimeRange] = useState<TimeRange>(() => {
+    try {
+      const stored = localStorage.getItem('ak_time_range_v2');
+      if (stored && ['1h', '1d', '7d', '1mo', '1y', 'all', 'custom'].includes(stored)) {
+        return stored as TimeRange;
+      }
+    } catch {}
+    return '7d';
+  });
+
+  // Compact telemetry status line visibility
+  const [showSyncStatusLine, setShowSyncStatusLine] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ak_hide_status_line') !== 'true';
+    } catch {
+      return true;
+    }
+  });
+
+  // Per-bank Hidden State (Requirement E)
+  const [hiddenBankIds, setHiddenBankIds] = useState<string[]>(() => db.getHiddenBankIds());
+
+  const handleSetTimeRange = (range: TimeRange) => {
+    setTimeRange(range);
+    try {
+      localStorage.setItem('ak_time_range_v2', range);
+    } catch {}
+  };
+
+  const handleToggleHideBank = async (bankId: string) => {
+    await db.toggleBankHidden(bankId);
+    setHiddenBankIds(db.getHiddenBankIds());
+  };
+
   // Load all data from native SQLite and SharedPreferences
   const loadData = useCallback(async () => {
     try {
@@ -83,6 +120,7 @@ export default function App() {
       setSettings(s);
       setPayments(p);
       setNativeStatus(stat);
+      setHiddenBankIds(db.getHiddenBankIds());
 
       const [a, w] = await Promise.all([
         db.getAccounts(),
@@ -176,6 +214,27 @@ export default function App() {
     return payments.some(p => p.timestamp > dayAgo && p.serverResult?.status === 'Ignored');
   }, [payments]);
 
+  // Requirement D: Memoized time-range filtered payments
+  const rangeFilteredPayments = useMemo(() => {
+    return filterPaymentsByTimeRange(payments, timeRange);
+  }, [payments, timeRange]);
+
+  // Filter payments by account and direction if selected
+  const displayedPayments = useMemo(() => {
+    let list = rangeFilteredPayments;
+    if (directionFilter !== 'all') {
+      list = list.filter(p => p.type === directionFilter);
+    }
+    if (!selectedAccountId) return list;
+    const acc = accounts.find(a => a.id === selectedAccountId);
+    if (!acc) return list;
+    const accBank = acc.bank.toUpperCase().trim();
+    return list.filter(p => {
+      const pBank = p.bank.toUpperCase().trim();
+      return pBank === accBank || (accBank === 'CBE' && pBank.includes('COMMERCIAL'));
+    });
+  }, [rangeFilteredPayments, selectedAccountId, accounts, directionFilter]);
+
   if (!settings) {
     return (
       <div className="min-h-screen bg-[#F4F7F5] flex items-center justify-center p-4">
@@ -190,19 +249,10 @@ export default function App() {
   const t = translations[settings.language];
   const pendingCount = nativeStatus.pending;
 
-  // Filter payments by account if selected
-  const displayedPayments = selectedAccountId
-    ? payments.filter(p => {
-        const acc = accounts.find(a => a.id === selectedAccountId);
-        if (!acc) return true;
-        const accBank = acc.bank.toUpperCase().trim();
-        const pBank = p.bank.toUpperCase().trim();
-        return pBank === accBank || (accBank === 'CBE' && pBank.includes('COMMERCIAL'));
-      })
-    : payments;
-
-  const handleToggleHideBalances = async () => {
-    const updated = { ...settings, hideBalances: !settings.hideBalances };
+  const handleToggleHideBalances = async (forceHide?: boolean) => {
+    if (!settings) return;
+    const nextVal = typeof forceHide === 'boolean' ? forceHide : !settings.hideBalances;
+    const updated = { ...settings, hideBalances: nextVal };
     await db.saveSettings(updated);
     setSettings(updated);
   };
@@ -302,41 +352,41 @@ export default function App() {
         {/* TAB 1: HOME */}
         {currentTab === 'home' && (
           <div className="space-y-4">
-            {/* Bold Headline */}
-            <div className="pt-1">
-              <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight font-['Poppins',sans-serif] leading-tight">
-                {t.headline}
-              </h1>
-              <p className="text-xs text-slate-400 mt-0.5">
-                {settings.language === 'am' ? 'የባንክ SMS በስልኩ በራሱ ይቀበላል፣ ወደ ሰርቨር ይልካል' : 'Native 24/7 SMS listener & SQLite queue forwarding'}
-              </p>
-            </div>
-
-            {/* Required: Home shows two debug lines */}
-            <div className="bg-slate-900 text-slate-100 rounded-2xl p-3 border border-slate-800 font-mono text-[11.5px] space-y-1.5 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400 font-sans font-semibold">Last SMS:</span>
-                <span className="font-bold text-emerald-400 truncate max-w-[240px]">
-                  {nativeStatus.lastSmsAt > 0
-                    ? `${nativeStatus.lastSmsSender || 'SMS'} · ${formatDebugTime(nativeStatus.lastSmsAt)}`
-                    : 'None'}
-                </span>
+            {/* Compact 1-line Telemetry Status Bar (can be hidden with ✕) */}
+            {showSyncStatusLine && (
+              <div className="flex items-center justify-between bg-slate-900 text-slate-100 px-3 py-1.5 rounded-xl border border-slate-800 font-mono text-[10.5px] shadow-2xs">
+                <div className="flex items-center gap-1.5 truncate min-w-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span className="text-slate-400 font-sans font-medium text-[10px]">SMS:</span>
+                  <span className="text-emerald-400 font-semibold truncate">
+                    {nativeStatus.lastSmsAt > 0
+                      ? `${nativeStatus.lastSmsSender || 'SMS'} ${formatDebugTime(nativeStatus.lastSmsAt)}`
+                      : 'None'}
+                  </span>
+                  <span className="text-slate-600">·</span>
+                  <span className="text-slate-400 font-sans font-medium text-[10px]">Server:</span>
+                  <span className={`font-bold ${
+                    nativeStatus.lastCode === 200 
+                      ? 'text-emerald-400' 
+                      : nativeStatus.lastCode > 0 
+                        ? 'text-rose-400' 
+                        : 'text-slate-400'
+                  }`}>
+                    {nativeStatus.lastCodeAt > 0 ? `HTTP ${nativeStatus.lastCode}` : 'None'}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowSyncStatusLine(false);
+                    try { localStorage.setItem('ak_hide_status_line', 'true'); } catch {}
+                  }}
+                  className="text-slate-500 hover:text-slate-300 p-0.5 ml-2 shrink-0 text-[10.5px]"
+                  title="Hide status line"
+                >
+                  ✕
+                </button>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400 font-sans font-semibold">Last server reply:</span>
-                <span className={`font-bold ${
-                  nativeStatus.lastCode === 200 
-                    ? 'text-emerald-400' 
-                    : nativeStatus.lastCode > 0 
-                      ? 'text-rose-400' 
-                      : 'text-slate-400'
-                }`}>
-                  {nativeStatus.lastCodeAt > 0
-                    ? `HTTP ${nativeStatus.lastCode} · ${formatDebugTime(nativeStatus.lastCodeAt)}`
-                    : 'None'}
-                </span>
-              </div>
-            </div>
+            )}
 
             {/* Real Bank Account Cards (Rule 3 & 4) */}
             <AccountsCardStack
@@ -344,9 +394,12 @@ export default function App() {
               payments={payments}
               settings={settings}
               selectedAccountId={selectedAccountId}
+              timeRange={timeRange}
+              hiddenBankIds={hiddenBankIds}
               onSelectAccount={setSelectedAccountId}
               onManageAccounts={() => setCurrentTab('organize')}
               onSaveOpeningBalance={handleSaveOpeningBalance}
+              onToggleHideBank={handleToggleHideBank}
               onAddCustomBank={handleAddCustomBank}
             />
 
@@ -356,17 +409,25 @@ export default function App() {
               accountCount={accounts.length}
               settings={settings}
               currentMonth={months[currentMonthIndex]}
+              timeRange={timeRange}
+              hiddenBankIds={hiddenBankIds}
+              activeDirection={directionFilter}
+              onFilterDirection={setDirectionFilter}
+              onChangeTimeRange={handleSetTimeRange}
               onPrevMonth={handlePrevMonth}
               onNextMonth={handleNextMonth}
               onToggleHideBalances={handleToggleHideBalances}
             />
 
-            {/* Three Quick-Action Tiles */}
+            {/* Quick-Action Shortcuts Tiles */}
             <QuickActions
               language={settings.language}
+              activeDirection={directionFilter}
+              onFilterDirection={setDirectionFilter}
               onOpenTelegram={() => setCurrentTab('organize')}
               onOpenSearch={() => setShowSearch(true)}
               onOpenAccounts={() => setCurrentTab('organize')}
+              onOpenSimulator={() => setShowSimulator(true)}
             />
 
             {/* Setup Banner */}
@@ -378,8 +439,10 @@ export default function App() {
 
             {/* Payments List (from native SQLite only with dedupe and edit) */}
             <PaymentsList
-              payments={displayedPayments.slice(0, 8)}
+              payments={displayedPayments}
               settings={settings}
+              activeDirection={directionFilter}
+              onFilterDirection={setDirectionFilter}
               onRetrySinglePayment={handleRetrySinglePayment}
               onDeletePayment={handleDeletePayment}
               onSaveOverride={handleSaveOverride}
@@ -448,6 +511,58 @@ export default function App() {
 
             {!showWithdrawalsSubView ? (
               <>
+                {/* Time Range Filter Chips (Requirement D) */}
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                  {(['1h', '1d', '7d', '1mo', '1y', 'all'] as TimeRange[]).map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => handleSetTimeRange(r)}
+                      className={`px-3 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
+                        timeRange === r
+                          ? 'bg-[#14503F] text-white shadow-xs'
+                          : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      {r === '1h' ? (settings.language === 'am' ? '1ሰዓት' : '1h') :
+                       r === '1d' ? (settings.language === 'am' ? '1ቀን' : '1d') :
+                       r === '7d' ? (settings.language === 'am' ? '7ቀን' : '7d') :
+                       r === '1mo' ? (settings.language === 'am' ? '1ወር' : '1mo') :
+                       r === '1y' ? (settings.language === 'am' ? '1ዓመት' : '1y') :
+                       (settings.language === 'am' ? 'ሁሉም' : 'All')}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Bank Filter Chips Bar */}
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                  <button
+                    onClick={() => setSelectedAccountId(null)}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
+                      !selectedAccountId
+                        ? 'bg-slate-900 text-white shadow-xs'
+                        : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    {settings.language === 'am' ? 'ሁሉም ባንኮች' : 'All Banks'}
+                  </button>
+                  {accounts.map(acc => (
+                    <button
+                      key={acc.id}
+                      onClick={() => setSelectedAccountId(selectedAccountId === acc.id ? null : acc.id)}
+                      className={`flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
+                        selectedAccountId === acc.id
+                          ? 'bg-[#14503F] text-white shadow-xs'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      {acc.logoUrl && (
+                        <img src={acc.logoUrl} alt={acc.name} className="w-3.5 h-3.5 object-contain rounded-full" />
+                      )}
+                      <span>{acc.shortCode || acc.name}</span>
+                    </button>
+                  ))}
+                </div>
+
                 <div className="flex items-center justify-between">
                   <div className="text-xs text-slate-400">
                     {pendingCount > 0 ? (
@@ -467,8 +582,10 @@ export default function App() {
                 </div>
 
                 <PaymentsList
-                  payments={payments}
+                  payments={displayedPayments}
                   settings={settings}
+                  activeDirection={directionFilter}
+                  onFilterDirection={setDirectionFilter}
                   onRetrySinglePayment={handleRetrySinglePayment}
                   onDeletePayment={handleDeletePayment}
                   onSaveOverride={handleSaveOverride}
@@ -603,7 +720,12 @@ export default function App() {
       {/* App PIN Lock Screen (Rule C2) */}
       {isLocked && (
         <SecurityLockScreen
-          onUnlock={() => setIsLocked(false)}
+          onUnlock={() => {
+            setIsLocked(false);
+            if (settings?.startHiddenAfterUnlock) {
+              handleToggleHideBalances(true);
+            }
+          }}
         />
       )}
     </div>

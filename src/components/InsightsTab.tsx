@@ -57,14 +57,14 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
     const rows = payments.map(p => [
       p.id,
       new Date(p.timestamp).toLocaleString(),
-      p.bank,
-      p.senderAddress,
-      p.type,
-      p.amount,
-      `"${p.counterparty.replace(/"/g, '""')}"`,
-      p.reference,
-      p.syncStatus,
-      `"${p.rawMessage.replace(/"/g, '""')}"`,
+      p.bank || 'Unknown',
+      p.senderAddress || '',
+      p.type || 'unknown',
+      p.amount || 0,
+      `"${(p.counterparty || '').replace(/"/g, '""')}"`,
+      p.reference || '',
+      p.syncStatus || 'local',
+      `"${(p.rawMessage || '').replace(/"/g, '""')}"`,
     ]);
 
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');

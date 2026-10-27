@@ -22,6 +22,9 @@ import {
 
 const LOCAL_STORAGE_KEYS = {
   CUSTOM_ACCOUNTS: 'ak_custom_accounts_v2',
+  ARCHIVED_ACCOUNTS: 'ak_archived_accounts_v2',
+  HIDDEN_BANKS: 'ak_hidden_banks_v2',
+  ACCOUNT_ORDER: 'ak_account_order_v2',
   WITHDRAWALS: 'ak_withdrawals_v2',
   LOGS: 'ak_sync_logs_v2',
   UI_PREFS: 'ak_ui_prefs_v2',
@@ -32,51 +35,71 @@ export const DEFAULT_BANK_ACCOUNTS: Omit<Account, 'balance' | 'receivedThisMonth
     id: 'acc-telebirr',
     name: 'Telebirr',
     bank: 'Telebirr',
+    shortCode: 'TLB',
+    senderIds: ['127'],
     type: 'mobile',
     accountNumber: '127',
     maskedNumber: '127 · Telebirr',
     accent: 'blue',
     brandColor: '#009EDB',
+    logoUrl: '/assets/aistudio/unnamed__2__485a8cc8.jpg',
+    orderIndex: 0,
   },
   {
     id: 'acc-cbe',
     name: 'Commercial Bank of Ethiopia',
     bank: 'CBE',
+    shortCode: 'CBE',
+    senderIds: ['CBE'],
     type: 'operating',
     accountNumber: '1000****4819',
     maskedNumber: 'CBE · 4819',
     accent: 'purple',
     brandColor: '#7A1C5A',
+    logoUrl: '/assets/aistudio/images__1__1__5e8bafae.jpg',
+    orderIndex: 1,
   },
   {
     id: 'acc-awash',
     name: 'Awash Bank',
     bank: 'Awash Bank',
+    shortCode: 'AWH',
+    senderIds: ['AwashBank', 'Awash'],
     type: 'operating',
     accountNumber: '0132****3321',
     maskedNumber: 'Awash · 3321',
-    accent: 'indigo',
-    brandColor: '#005DAA',
+    accent: 'amber',
+    brandColor: '#E67300',
+    logoUrl: '/assets/aistudio/images__1__3__de75fa72.jpg',
+    orderIndex: 2,
   },
   {
     id: 'acc-dashen',
     name: 'Dashen Bank',
     bank: 'Dashen Bank',
+    shortCode: 'DSH',
+    senderIds: ['Dashen', 'DashenBank'],
     type: 'operating',
     accountNumber: '0021****5510',
     maskedNumber: 'Dashen · 5510',
     accent: 'cyan',
-    brandColor: '#0A2558',
+    brandColor: '#0B2055',
+    logoUrl: '/assets/aistudio/images__1__2__b5cc990f.jpg',
+    orderIndex: 3,
   },
   {
     id: 'acc-boa',
     name: 'Bank of Abyssinia',
     bank: 'Bank of Abyssinia',
+    shortCode: 'BOA',
+    senderIds: ['BOA', 'Abyssinia'],
     type: 'operating',
     accountNumber: '0412****9901',
     maskedNumber: 'BOA · 9901',
     accent: 'gold',
-    brandColor: '#C98A00',
+    brandColor: '#E49600',
+    logoUrl: '/assets/aistudio/images__1__4__6fad4b0d.jpg',
+    orderIndex: 4,
   },
 ];
 
@@ -104,6 +127,8 @@ class DatabaseService {
       language: uiPrefs.language === 'am' ? 'am' : 'en',
       hideBalances: !!uiPrefs.hideBalances,
       soundEnabled: uiPrefs.soundEnabled !== false,
+      excludeHiddenFromTotal: !!uiPrefs.excludeHiddenFromTotal,
+      startHiddenAfterUnlock: !!uiPrefs.startHiddenAfterUnlock,
       serviceRunning: true,
     };
   }
@@ -128,6 +153,8 @@ class DatabaseService {
     if (newSettings.language !== undefined) uiPrefs.language = newSettings.language;
     if (newSettings.hideBalances !== undefined) uiPrefs.hideBalances = newSettings.hideBalances;
     if (newSettings.soundEnabled !== undefined) uiPrefs.soundEnabled = newSettings.soundEnabled;
+    if (newSettings.excludeHiddenFromTotal !== undefined) uiPrefs.excludeHiddenFromTotal = newSettings.excludeHiddenFromTotal;
+    if (newSettings.startHiddenAfterUnlock !== undefined) uiPrefs.startHiddenAfterUnlock = newSettings.startHiddenAfterUnlock;
     try {
       localStorage.setItem(LOCAL_STORAGE_KEYS.UI_PREFS, JSON.stringify(uiPrefs));
     } catch {}
@@ -249,8 +276,25 @@ class DatabaseService {
       const counterparty = ov?.counterparty || parsed.counterparty;
       const type = (ov?.direction as any) || parsed.type;
       const note = ov?.note || undefined;
-      const rememberedTag = counterpartyTags[counterparty.trim()] || counterpartyTags[counterparty.toLowerCase().trim()];
-      const tag = ov?.tag || rememberedTag || undefined;
+
+      // Fix Tag Bug (Part B):
+      // Only remember tags by a real non-empty counterparty name (or account tail).
+      // NEVER auto-apply a tag, only SUGGEST it as a tappable chip.
+      // Remove tags that were auto-applied to rows without a name.
+      const hasRealName = Boolean(counterparty && counterparty.trim().length > 0);
+      const cleanCp = hasRealName ? counterparty.trim() : '';
+      const rememberedTag = cleanCp ? (counterpartyTags[cleanCp] || counterpartyTags[cleanCp.toLowerCase()]) : undefined;
+
+      // Only apply tag if explicitly set by user override (and never if nameless auto-applied tag)
+      let tag: string | undefined = undefined;
+      if (ov?.tag) {
+        if (hasRealName || (parsed.accountNumber && parsed.accountNumber.length > 0)) {
+          tag = ov.tag;
+        }
+      }
+
+      // Suggest remembered tag as a chip if not already tagged
+      const suggestedTag = !tag && rememberedTag ? rememberedTag : undefined;
       const isOverridden = !!(ov && (ov.counterparty || ov.direction || ov.note || ov.tag || ov.isHidden));
 
       return {
@@ -285,6 +329,7 @@ class DatabaseService {
         isDuplicate: false,
         note,
         tag,
+        suggestedTag,
         isHidden,
         isOverridden,
       };
@@ -321,20 +366,185 @@ class DatabaseService {
     return list.find(p => p.id === id) || null;
   }
 
-  public async getAccounts(): Promise<Account[]> {
-    const [payments, openingBalances] = await Promise.all([
-      this.getAllPayments(false),
-      this.getOpeningBalances(),
-    ]);
+  public getHiddenBankIds(): string[] {
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.HIDDEN_BANKS);
+      if (stored) {
+        const arr = JSON.parse(stored);
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch {}
+    return [];
+  }
 
-    // Load any user-added bank accounts (e.g. Abay, Wegagen, Nib, Zemen)
+  public isBankHidden(bankId: string): boolean {
+    const hidden = this.getHiddenBankIds();
+    return hidden.includes(bankId);
+  }
+
+  public async toggleBankHidden(bankId: string): Promise<boolean> {
+    const list = this.getHiddenBankIds();
+    const index = list.indexOf(bankId);
+    let isHiddenNow = false;
+    if (index >= 0) {
+      list.splice(index, 1);
+      isHiddenNow = false;
+    } else {
+      list.push(bankId);
+      isHiddenNow = true;
+    }
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.HIDDEN_BANKS, JSON.stringify(list));
+    } catch {}
+    return isHiddenNow;
+  }
+
+  public getArchivedBankIds(): string[] {
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS);
+      if (stored) {
+        const arr = JSON.parse(stored);
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch {}
+    return [];
+  }
+
+  public async archiveAccount(id: string): Promise<void> {
+    const list = this.getArchivedBankIds();
+    if (!list.includes(id)) {
+      list.push(id);
+      try {
+        localStorage.setItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS, JSON.stringify(list));
+      } catch {}
+    }
+
+    // Stop monitoring: remove sender IDs from allowedSenders in native SharedPreferences
+    const accounts = await this.getAccounts(true);
+    const target = accounts.find(a => a.id === id);
+    if (target && target.senderIds && target.senderIds.length > 0) {
+      const settings = await this.getSettings();
+      const sendersToRemove = new Set(target.senderIds.map(s => s.toLowerCase().trim()));
+      const updatedSenders = settings.allowedSenders.filter(s => !sendersToRemove.has(s.toLowerCase().trim()));
+      await this.saveSettings({ allowedSenders: updatedSenders });
+    }
+  }
+
+  public async restoreAccount(id: string): Promise<void> {
+    let list = this.getArchivedBankIds();
+    list = list.filter(item => item !== id);
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS, JSON.stringify(list));
+    } catch {}
+
+    // Resume monitoring: add sender IDs back to allowedSenders
+    const accounts = await this.getAccounts(true);
+    const target = accounts.find(a => a.id === id);
+    if (target && target.senderIds && target.senderIds.length > 0) {
+      const settings = await this.getSettings();
+      const existing = new Set(settings.allowedSenders.map(s => s.toLowerCase().trim()));
+      const toAdd = target.senderIds.filter(s => !existing.has(s.toLowerCase().trim()));
+      if (toAdd.length > 0) {
+        await this.saveSettings({ allowedSenders: [...settings.allowedSenders, ...toAdd] });
+      }
+    }
+  }
+
+  public async reorderAccounts(accountIds: string[]): Promise<void> {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER, JSON.stringify(accountIds));
+    } catch {}
+  }
+
+  public async saveAccount(account: Account): Promise<void> {
+    // 1. If opening balance changed, persist it
+    if (account.openingBalance !== undefined) {
+      await this.saveOpeningBalance(account.bank, account.openingBalance);
+    }
+
+    // 2. Persist custom/overridden accounts
     let userAdded: Account[] = [];
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
       if (stored) userAdded = JSON.parse(stored);
     } catch {}
 
-    const baseAccounts = [...DEFAULT_BANK_ACCOUNTS, ...userAdded];
+    const index = userAdded.findIndex(a => a.id === account.id);
+    if (index >= 0) {
+      userAdded[index] = { ...userAdded[index], ...account };
+    } else {
+      userAdded.push(account);
+    }
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(userAdded));
+    } catch {}
+
+    // 3. Update sender IDs mapping & monitored senders
+    if (account.senderIds && account.senderIds.length > 0) {
+      for (const s of account.senderIds) {
+        const cleanS = s.trim();
+        if (cleanS) {
+          await this.saveSenderBankMapping(cleanS, account.bank);
+        }
+      }
+      const settings = await this.getSettings();
+      const existing = new Set(settings.allowedSenders.map(s => s.toLowerCase().trim()));
+      const toAdd = account.senderIds.filter(s => s.trim() && !existing.has(s.toLowerCase().trim()));
+      if (toAdd.length > 0) {
+        await this.saveSettings({ allowedSenders: [...settings.allowedSenders, ...toAdd] });
+      }
+    }
+  }
+
+  public async getAccounts(includeArchived: boolean = false): Promise<Account[]> {
+    const [payments, openingBalances] = await Promise.all([
+      this.getAllPayments(false),
+      this.getOpeningBalances(),
+    ]);
+
+    // Load any user-added or overridden bank accounts
+    let userAdded: Account[] = [];
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
+      if (stored) userAdded = JSON.parse(stored);
+    } catch {}
+
+    // Merge default accounts with user overrides
+    const baseMap = new Map<string, any>();
+    for (const d of DEFAULT_BANK_ACCOUNTS) {
+      baseMap.set(d.id, { ...d });
+    }
+    for (const u of userAdded) {
+      baseMap.set(u.id, { ...(baseMap.get(u.id) || {}), ...u });
+    }
+
+    let baseAccounts = Array.from(baseMap.values());
+
+    // Filter archived accounts
+    const archivedIds = new Set(this.getArchivedBankIds());
+    if (!includeArchived) {
+      baseAccounts = baseAccounts.filter(a => !archivedIds.has(a.id));
+    } else {
+      baseAccounts = baseAccounts.map(a => ({
+        ...a,
+        isArchived: archivedIds.has(a.id),
+      }));
+    }
+
+    // Apply custom order if stored
+    try {
+      const storedOrder = localStorage.getItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER);
+      if (storedOrder) {
+        const orderArr: string[] = JSON.parse(storedOrder);
+        const orderMap = new Map<string, number>();
+        orderArr.forEach((id, idx) => orderMap.set(id, idx));
+        baseAccounts.sort((a, b) => {
+          const aIdx = orderMap.has(a.id) ? orderMap.get(a.id)! : 999;
+          const bIdx = orderMap.has(b.id) ? orderMap.get(b.id)! : 999;
+          return aIdx - bIdx;
+        });
+      }
+    } catch {}
 
     const currentMonth = new Date().getMonth();
     const currentYear = new Date().getFullYear();
@@ -350,7 +560,6 @@ class DatabaseService {
       // Filter payments that are not duplicate for amounts
       const nonDuplicatePayments = bankPayments.filter(p => !p.isDuplicate);
 
-      // Check this month's received and sent using integer cents
       let receivedCentsThisMonth = 0;
       let sentCentsThisMonth = 0;
       let totalReceivedCents = 0;
@@ -398,6 +607,7 @@ class DatabaseService {
 
       return {
         ...base,
+        isArchived: archivedIds.has(base.id),
         balance: currentBalance,
         receivedThisMonth,
         sentThisMonth,
@@ -414,6 +624,18 @@ class DatabaseService {
       list.push(newAccount);
       localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(list));
     } catch {}
+
+    if (newAccount.senderIds && newAccount.senderIds.length > 0) {
+      for (const s of newAccount.senderIds) {
+        if (s.trim()) await this.saveSenderBankMapping(s.trim(), newAccount.bank);
+      }
+      const settings = await this.getSettings();
+      const existing = new Set(settings.allowedSenders.map(s => s.toLowerCase().trim()));
+      const toAdd = newAccount.senderIds.filter(s => s.trim() && !existing.has(s.toLowerCase().trim()));
+      if (toAdd.length > 0) {
+        await this.saveSettings({ allowedSenders: [...settings.allowedSenders, ...toAdd] });
+      }
+    }
   }
 
   public async insertTestSms(sender: string, body: string): Promise<boolean> {

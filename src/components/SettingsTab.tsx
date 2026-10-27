@@ -63,6 +63,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           mode: parsed.mode ?? settings.mode,
           httpMethod: parsed.httpMethod ?? settings.httpMethod ?? 'GET',
           retryIntervalSeconds: parsed.retryIntervalSeconds ?? settings.retryIntervalSeconds ?? 15,
+          excludeHiddenFromTotal: parsed.excludeHiddenFromTotal ?? settings.excludeHiddenFromTotal ?? false,
+          startHiddenAfterUnlock: parsed.startHiddenAfterUnlock ?? settings.startHiddenAfterUnlock ?? false,
         };
       }
     } catch {}
@@ -72,6 +74,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       mode: settings.mode,
       httpMethod: settings.httpMethod || 'GET',
       retryIntervalSeconds: settings.retryIntervalSeconds || 15,
+      excludeHiddenFromTotal: settings.excludeHiddenFromTotal ?? false,
+      startHiddenAfterUnlock: settings.startHiddenAfterUnlock ?? false,
     };
   });
 
@@ -427,6 +431,53 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </div>
               </button>
             </div>
+          </div>
+
+          {/* 5. Privacy & Balance Options (Requirement E) */}
+          <div className="space-y-2 pt-2 border-t border-slate-100">
+            <label className="text-xs font-bold text-slate-800 font-['Poppins',sans-serif] block">
+              {isAm ? 'የግላዊነት እና የሂሳብ አማራጮች' : 'Privacy & Calculation Options'}
+            </label>
+
+            {/* Exclude hidden banks from total */}
+            <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={formData.excludeHiddenFromTotal}
+                onChange={e => handleFieldChange('excludeHiddenFromTotal', e.target.checked)}
+                className="mt-0.5 rounded text-[#14503F] focus:ring-[#14503F]"
+              />
+              <div className="text-[11px] leading-tight">
+                <span className="font-bold text-slate-800">
+                  {isAm ? 'የተደበቁ ባንኮችን ከጠቅላላ ድምር አስቀር' : 'Exclude hidden banks from total'}
+                </span>
+                <span className="block text-[10px] text-slate-400 mt-0.5">
+                  {isAm 
+                    ? 'በዓይን ምልክት የተደበቁ ባንኮች ቀሪ ሂሳብ ከNet Movement ካርድ ድምር አይካተትም' 
+                    : 'When you hide a bank card, its balances are omitted from the main Net Movement totals'}
+                </span>
+              </div>
+            </label>
+
+            {/* Start hidden after unlock */}
+            <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={formData.startHiddenAfterUnlock}
+                onChange={e => handleFieldChange('startHiddenAfterUnlock', e.target.checked)}
+                className="mt-0.5 rounded text-[#14503F] focus:ring-[#14503F]"
+              />
+              <div className="text-[11px] leading-tight">
+                <span className="font-bold text-slate-800">
+                  {isAm ? 'ከመቆለፊያ በኋላ በድብቅ ጀምር' : 'Start hidden after unlock'}
+                </span>
+                <span className="block text-[10px] text-slate-400 mt-0.5">
+                  {isAm 
+                    ? 'የመተግበሪያውን PIN ከከፈቱ በኋላ መጠኖች በነባሪነት ተደብቀው (••••) ይጀምራሉ' 
+                    : 'With app PIN lock on, starts with balances masked (••••) until you tap the eye icon'}
+                </span>
+              </div>
+            </label>
           </div>
         </div>
 

@@ -43,6 +43,8 @@ export type BankName =
   | 'Hibret Bank'
   | string;
 
+export type TimeRange = '1h' | '1d' | '7d' | '1mo' | '1y' | 'all' | 'custom';
+
 export interface PaymentRecord {
   id: string;
   senderAddress: string;
@@ -76,6 +78,7 @@ export interface PaymentRecord {
   isDuplicate?: boolean;
   note?: string;
   tag?: string;
+  suggestedTag?: string;
   isHidden?: boolean;
   isOverridden?: boolean;
 }
@@ -106,12 +109,17 @@ export interface Account {
   id: string;
   name: string;
   bank: string;
+  shortCode?: string;
+  senderIds?: string[];
   type: 'mobile' | 'operating' | 'shop' | 'other';
   accountNumber: string;
   maskedNumber: string;
   balance: number;
   accent: 'blue' | 'indigo' | 'gold' | 'emerald' | 'amber' | 'cyan' | 'purple' | 'red';
   brandColor?: string;
+  logoUrl?: string;
+  isArchived?: boolean;
+  orderIndex?: number;
   receivedThisMonth?: number;
   sentThisMonth?: number;
   openingBalance?: number;
@@ -145,6 +153,9 @@ export interface AppSettings {
   hideBalances: boolean;
   soundEnabled: boolean;
   serviceRunning: boolean;
+  excludeHiddenFromTotal?: boolean;
+  startHiddenAfterUnlock?: boolean;
+  timeRange?: TimeRange;
 }
 
 export interface SyncLogEntry {

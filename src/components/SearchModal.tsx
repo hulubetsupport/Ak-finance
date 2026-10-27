@@ -51,13 +51,19 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       // 1. Text Query (Name, Ref, Bank, Raw text)
       if (query.trim()) {
         const q = query.toLowerCase().trim();
+        const cp = (p.counterparty || '').toLowerCase();
+        const ref = (p.reference || '').toLowerCase();
+        const bank = (p.bank || '').toLowerCase();
+        const raw = (p.rawMessage || '').toLowerCase();
+        const tag = (p.tag || '').toLowerCase();
+        const amt = (p.amount || 0).toString();
         const match =
-          p.counterparty.toLowerCase().includes(q) ||
-          p.reference.toLowerCase().includes(q) ||
-          p.bank.toLowerCase().includes(q) ||
-          p.rawMessage.toLowerCase().includes(q) ||
-          (p.tag && p.tag.toLowerCase().includes(q)) ||
-          p.amount.toString().includes(q);
+          cp.includes(q) ||
+          ref.includes(q) ||
+          bank.includes(q) ||
+          raw.includes(q) ||
+          tag.includes(q) ||
+          amt.includes(q);
         if (!match) return false;
       }
 

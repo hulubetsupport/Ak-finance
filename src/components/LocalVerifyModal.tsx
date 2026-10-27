@@ -157,8 +157,11 @@ export const LocalVerifyModal: React.FC<LocalVerifyModalProps> = ({
   const isAmountMatch = matchedPayment && hasAmountInput && Math.abs(matchedPayment.amount - searchedAmount) < 0.01;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-lg rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4 max-h-[92dvh] overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex flex-col justify-end sm:justify-center items-center p-0 sm:p-4">
+      <div 
+        style={{ maxHeight: 'calc(100dvh - 16px)' }}
+        className="bg-white w-full max-w-lg rounded-t-[28px] sm:rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4 overflow-y-auto shrink-0 pb-8 sm:pb-5 animate-in slide-in-from-bottom-6 duration-200"
+      >
         {/* Header */}
         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
           <div className="flex items-center gap-2">

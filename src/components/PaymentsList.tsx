@@ -1,79 +1,170 @@
-import React, { useState } from 'react';
-import { PaymentRecord, AppSettings, PaymentType } from '../types/index.ts';
-import { translations } from '../utils/i18n.ts';
+import React, { useState, useMemo } from 'react';
 import { 
-  CheckCircle2, 
-  Clock, 
-  AlertCircle, 
-  HardDrive, 
+  PaymentRecord, 
+  PaymentType, 
+  AppSettings, 
+  PaymentCategory 
+} from '../types/index.ts';
+import { 
+  ArrowDownLeft, 
+  ArrowUpRight, 
   Copy, 
-  RefreshCw, 
-  X, 
-  CreditCard, 
   Check, 
-  Edit3, 
+  AlertCircle, 
+  Clock, 
+  ExternalLink, 
+  Eye, 
   EyeOff, 
-  AlertTriangle,
-  ArrowDownLeft,
-  ArrowUpRight,
-  HelpCircle,
+  Building2, 
+  Edit2, 
+  Trash2, 
+  RotateCcw,
+  Tag as TagIcon,
+  Tag,
+  CreditCard,
+  Receipt,
   Smartphone,
   Wifi,
-  Receipt,
   Banknote,
   ArrowLeftRight,
-  Tag as TagIcon,
-  ExternalLink
+  HardDrive,
+  Info,
+  X,
+  Share2,
+  Search,
+  FileText,
+  Download,
+  SlidersHorizontal,
+  ChevronDown
 } from 'lucide-react';
-import { getBankBrand } from '../constants/bankBrands.ts';
+import { translations } from '../utils/i18n.ts';
+import { getBankBrand, BankBrand } from '../constants/bankBrands.ts';
 
 interface PaymentsListProps {
   payments: PaymentRecord[];
   settings: AppSettings;
+  activeDirection?: 'all' | 'received' | 'sent';
+  onFilterDirection?: (dir: 'all' | 'received' | 'sent') => void;
   onRetrySinglePayment: (payment: PaymentRecord) => Promise<void>;
-  onDeletePayment?: (id: string) => Promise<void>;
+  onDeletePayment: (id: string) => Promise<void>;
   onSaveOverride?: (
-    paymentId: string,
+    id: string,
     override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean }
   ) => Promise<void>;
 }
 
-const COMMON_TAGS = ['School', 'Wifi', 'Rent', 'Food', 'Other bank'];
-
 export const PaymentsList: React.FC<PaymentsListProps> = ({
   payments,
   settings,
+  activeDirection,
+  onFilterDirection,
   onRetrySinglePayment,
+  onDeletePayment,
   onSaveOverride,
 }) => {
   const [selectedPayment, setSelectedPayment] = useState<PaymentRecord | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedSummary, setCopiedSummary] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
-  // Edit modal state
+  // Direction filter (internal fallback if activeDirection not controlled)
+  const [internalDirection, setInternalDirection] = useState<'all' | 'received' | 'sent'>('all');
+  const currentDirection = activeDirection !== undefined ? activeDirection : internalDirection;
+
+  // Category and Search filter
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [showSearchInput, setShowSearchInput] = useState<boolean>(false);
+
+  // Quick edit modal or row title edit
   const [isEditing, setIsEditing] = useState(false);
   const [editCounterparty, setEditCounterparty] = useState('');
   const [editDirection, setEditDirection] = useState<PaymentType>('unknown');
+  const [editCategory, setEditCategory] = useState<string>('transfer');
   const [editNote, setEditNote] = useState('');
   const [editTag, setEditTag] = useState('');
   const [savingOverride, setSavingOverride] = useState(false);
 
-  // Performance pagination for 5,000+ rows
+  // Quick inline name edit state
+  const [inlineEditPayment, setInlineEditPayment] = useState<PaymentRecord | null>(null);
+  const [inlineName, setInlineName] = useState('');
+
+  // Performance pagination
   const [visibleCount, setVisibleCount] = useState(50);
 
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
 
+  const triggerHaptic = () => {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try {
+        navigator.vibrate(10);
+      } catch {}
+    }
+  };
+
+  const handleSetDirection = (dir: 'all' | 'received' | 'sent') => {
+    triggerHaptic();
+    setInternalDirection(dir);
+    onFilterDirection?.(dir);
+    setVisibleCount(50);
+  };
+
+  // Filtered Payments calculation
+  const filteredPayments = useMemo(() => {
+    return payments.filter(p => {
+      // 1. Direction filter
+      if (currentDirection !== 'all' && p.type !== currentDirection) {
+        return false;
+      }
+
+      // 2. Category filter
+      if (selectedCategory !== 'all') {
+        if (selectedCategory === 'airtime' && p.category !== 'airtime') return false;
+        if (selectedCategory === 'data' && p.category !== 'data') return false;
+        if (selectedCategory === 'atm-card' && p.category !== 'atm-card') return false;
+        if (selectedCategory === 'bill' && p.category !== 'bill') return false;
+        if (selectedCategory === 'transfer' && p.category !== 'transfer' && p.category !== undefined) return false;
+      }
+
+      // 3. Search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const cp = (p.counterparty || '').toLowerCase();
+        const ref = (p.reference || '').toLowerCase();
+        const bank = (p.bank || '').toLowerCase();
+        const raw = (p.rawMessage || '').toLowerCase();
+        const tag = (p.tag || '').toLowerCase();
+        const amt = (p.amount || 0).toString();
+
+        const match = cp.includes(q) || ref.includes(q) || bank.includes(q) || raw.includes(q) || tag.includes(q) || amt.includes(q);
+        if (!match) return false;
+      }
+
+      return true;
+    });
+  }, [payments, currentDirection, selectedCategory, searchQuery]);
+
+  // Totals for direction chips
+  const totalReceived = useMemo(() => {
+    return payments
+      .filter(p => p.type === 'received' && !p.isDuplicate && !p.isHidden)
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+  }, [payments]);
+
+  const totalSent = useMemo(() => {
+    return payments
+      .filter(p => p.type === 'sent' && !p.isDuplicate && !p.isHidden)
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+  }, [payments]);
+
+  const receivedCount = useMemo(() => payments.filter(p => p.type === 'received').length, [payments]);
+  const sentCount = useMemo(() => payments.filter(p => p.type === 'sent').length, [payments]);
+
   const formatAmountCompact = (num: number, type: PaymentType) => {
     if (settings.hideBalances) return '••••';
     const sign = type === 'received' ? '+' : type === 'sent' ? '-' : '';
-    let valStr = '';
-    if (num >= 1000) {
-      valStr = (num / 1000).toFixed(1) + 'K';
-    } else {
-      valStr = num.toLocaleString('en-US');
-    }
-    return `${sign}${valStr}`;
+    return `${sign}${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   const formatDateTime = (timestamp: number) => {
@@ -86,55 +177,12 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     return `${day} ${month} ${hours}:${mins}`;
   };
 
-  const getBankBadge = (bank: string) => {
-    const b = (bank || '').toUpperCase();
-    if (b.includes('TELEBIRR') || b === '127') {
-      return { text: 'TLB', bg: 'bg-sky-100 text-sky-900 border-sky-200' };
-    }
-    if (b.includes('CBE') || b.includes('COMMERCIAL')) {
-      return { text: 'CBE', bg: 'bg-purple-100 text-purple-900 border-purple-200' };
-    }
-    if (b.includes('AWASH')) {
-      return { text: 'AWA', bg: 'bg-amber-100 text-amber-900 border-amber-200' };
-    }
-    if (b.includes('DASHEN')) {
-      return { text: 'DSH', bg: 'bg-blue-100 text-blue-900 border-blue-200' };
-    }
-    if (b.includes('BOA') || b.includes('ABYSSINIA')) {
-      return { text: 'BOA', bg: 'bg-yellow-100 text-yellow-900 border-yellow-200' };
-    }
-    if (b.includes('ABAY')) {
-      return { text: 'ABY', bg: 'bg-emerald-100 text-emerald-900 border-emerald-200' };
-    }
-    if (b.includes('WEGAGEN')) {
-      return { text: 'WGG', bg: 'bg-orange-100 text-orange-900 border-orange-200' };
-    }
-    return {
-      text: (bank || 'SMS').substring(0, 3).toUpperCase(),
-      bg: 'bg-slate-100 text-slate-800 border-slate-200',
-    };
-  };
-
-  const getStatusDot = (status: PaymentRecord['syncStatus']) => {
-    switch (status) {
-      case 'sent':
-        return <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-xs shrink-0" title="Sent (HTTP 200)" />;
-      case 'pending':
-        return <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shadow-xs shrink-0" title="Pending" />;
-      case 'failed':
-        return <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-xs shrink-0" title="Failed" />;
-      case 'local':
-      default:
-        return <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shadow-xs shrink-0" title="Local SQLite" />;
-    }
-  };
-
   const getSyncStatusBadge = (item: PaymentRecord) => {
     const sr = item.serverResult;
     if (sr) {
       if (sr.resolving) {
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200" title="The server is fetching the CBE transaction number">
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200">
             <Clock size={11} className="text-blue-600 animate-spin" />
             <span>FT pending</span>
           </span>
@@ -143,29 +191,24 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
       if (sr.status === 'Saved') {
         return (
           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-            <CheckCircle2 size={11} className="text-emerald-600" />
+            <Check size={11} className="text-emerald-600" />
             <span>Saved ✓</span>
           </span>
         );
       }
       if (sr.status === 'Duplicate') {
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-300">
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-300">
             <span>Duplicate</span>
           </span>
         );
       }
       if (sr.status === 'Ignored') {
         return (
-          <div className="flex items-center gap-1">
-            <span
-              className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-300"
-              title={sr.reason ? `Server did NOT save this: ${sr.reason}` : 'Server did NOT save this'}
-            >
-              <AlertTriangle size={11} className="text-amber-600" />
-              <span className="truncate max-w-[130px]">
-                {sr.reason ? `Ignored: ${sr.reason}` : 'Ignored'}
-              </span>
+          <div className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-300" title={sr.reason || 'Ignored by server'}>
+              <AlertCircle size={11} className="text-amber-600" />
+              <span>Ignored{sr.reason ? `: ${sr.reason}` : ''}</span>
             </span>
             <button
               type="button"
@@ -174,28 +217,27 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                 handleManualRetry(item);
               }}
               disabled={retryingId === item.id}
-              className="px-1.5 py-0.5 text-[9.5px] font-bold bg-amber-100 text-amber-900 rounded border border-amber-300 hover:bg-amber-200 disabled:opacity-50"
+              className="px-1.5 py-0.5 text-[9.5px] font-bold bg-amber-100 text-amber-900 rounded border border-amber-300 hover:bg-amber-200"
             >
-              {retryingId === item.id ? '...' : 'Retry'}
+              Retry
             </button>
           </div>
         );
       }
-      if (sr.httpCode === 200 && sr.status === 'Unknown') {
+      if (sr.status === 'Unknown' || (!sr.status && sr.httpCode === 200)) {
         return (
-          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200" title="HTTP 200 with non-JSON reply">
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
             <span>Unknown reply</span>
           </span>
         );
       }
     }
 
-    // Default status handling when no explicit server_result reply yet
     switch (item.syncStatus) {
       case 'sent':
         return (
           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-            <CheckCircle2 size={11} className="text-emerald-600" />
+            <Check size={11} className="text-emerald-600" />
             <span>Saved ✓</span>
           </span>
         );
@@ -240,6 +282,40 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
+    triggerHaptic();
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleCopySummary = () => {
+    const lines = [
+      `📊 Ak Financial Statement Summary`,
+      `📅 Period Transactions: ${filteredPayments.length}`,
+      `💰 Total Received: +${totalReceived.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB (${receivedCount} in)`,
+      `💸 Total Sent: -${totalSent.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB (${sentCount} out)`,
+      `📈 Net Movement: ${(totalReceived - totalSent >= 0 ? '+' : '-')}${Math.abs(totalReceived - totalSent).toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB`,
+      `Generated on ${new Date().toLocaleDateString()}`
+    ];
+    navigator.clipboard.writeText(lines.join('\n'));
+    setCopiedSummary(true);
+    triggerHaptic();
+    setTimeout(() => setCopiedSummary(false), 2500);
+  };
+
+  const handleSharePaymentReceipt = (item: PaymentRecord) => {
+    const text = [
+      `🧾 Payment Confirmation`,
+      `🏦 Bank: ${item.bank}`,
+      `💵 Amount: ${item.type === 'received' ? '+' : '-'}${item.amount.toFixed(2)} ETB`,
+      `🔄 Direction: ${item.type === 'received' ? 'Received (In)' : 'Sent (Out)'}`,
+      item.counterparty ? `👤 Party: ${item.counterparty}` : '',
+      item.reference ? `🔢 Ref/FT: ${item.reference}` : '',
+      item.v2Code ? `🔗 Receipt: https://mbreciept.cbe.com.et/${item.v2Code}` : '',
+      `📅 Date: ${new Date(item.timestamp).toLocaleString()}`,
+    ].filter(Boolean).join('\n');
+
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    triggerHaptic();
     setTimeout(() => setCopied(false), 2000);
   };
 
@@ -249,38 +325,43 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     setRetryingId(null);
   };
 
-  const triggerHaptic = () => {
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      try {
-        navigator.vibrate(10);
-      } catch {}
+  const getRowTitle = (item: PaymentRecord): string => {
+    const cp = (item.counterparty || '').trim();
+    const tail = item.accountNumber ? `acct …${item.accountNumber.slice(-4)}` : '';
+
+    if (item.type === 'received') {
+      if (cp) return `From ${cp}`;
+      if (tail) return `Unknown sender (${tail})`;
+      return isAm ? 'ያልታወቀ ላኪ' : 'Unknown sender';
     }
+
+    if (item.type === 'sent') {
+      if (cp) return `To ${cp}`;
+      if (item.category === 'airtime') return `Airtime Recharge${tail ? ` (${tail})` : ''}`;
+      if (item.category === 'data') return `Data Package${tail ? ` (${tail})` : ''}`;
+      if (item.category === 'atm-card') return 'ATM / Card debit';
+      if (item.category === 'bill') return `Bill Payment${tail ? ` (${tail})` : ''}`;
+      if (item.category === 'payment') return `Payment${tail ? ` (${tail})` : ''}`;
+      if (tail) return `Unknown receiver (${tail})`;
+      return isAm ? 'ያልታወቀ ተቀባይ' : 'Unknown receiver';
+    }
+
+    if (cp) return cp;
+    return isAm ? 'ያልታወቀ ግብይት' : 'Unknown transaction';
   };
 
-  const getCategoryIcon = (category?: string) => {
-    switch (category) {
-      case 'airtime':
-        return <Smartphone size={11} className="text-sky-600" />;
-      case 'data':
-        return <Wifi size={11} className="text-blue-600" />;
-      case 'bill':
-        return <Receipt size={11} className="text-amber-600" />;
-      case 'cash':
-        return <Banknote size={11} className="text-emerald-600" />;
-      case 'transfer':
-      default:
-        return <ArrowLeftRight size={11} className="text-slate-500" />;
-    }
-  };
-
-  const getCategoryLabel = (category?: string) => {
+  const getCategoryLabel = (category?: PaymentCategory | string): string => {
     switch (category) {
       case 'airtime':
         return isAm ? 'አየር ሰዓት' : 'Airtime';
       case 'data':
         return isAm ? 'ዳታ' : 'Data';
+      case 'atm-card':
+        return isAm ? 'ATM / ካርድ' : 'ATM/Card';
       case 'bill':
         return isAm ? 'ቢል' : 'Bill';
+      case 'payment':
+        return isAm ? 'ክፍያ' : 'Payment';
       case 'cash':
         return isAm ? 'ጥሬ ገንዘብ' : 'Cash';
       case 'transfer':
@@ -295,11 +376,48 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     setIsEditing(false);
     setEditCounterparty(payment.counterparty || '');
     setEditDirection(payment.type);
+    setEditCategory(payment.category || 'transfer');
     setEditNote(payment.note || '');
     setEditTag(payment.tag || '');
   };
 
-  const handleSaveEdit = async () => {
+  const openInlineNameEdit = (e: React.MouseEvent, payment: PaymentRecord) => {
+    e.stopPropagation();
+    triggerHaptic();
+    setInlineEditPayment(payment);
+    setInlineName(payment.counterparty || '');
+  };
+
+  const handleSaveInlineName = async () => {
+    if (!inlineEditPayment || !onSaveOverride) return;
+    setSavingOverride(true);
+    try {
+      await onSaveOverride(inlineEditPayment.id, {
+        counterparty: inlineName.trim(),
+        direction: inlineEditPayment.type,
+        note: inlineEditPayment.note,
+        tag: inlineEditPayment.tag,
+        isHidden: false,
+      });
+      setInlineEditPayment(null);
+    } finally {
+      setSavingOverride(false);
+    }
+  };
+
+  const handleApplySuggestedTag = async (payment: PaymentRecord, tagToApply: string) => {
+    if (!onSaveOverride) return;
+    triggerHaptic();
+    await onSaveOverride(payment.id, {
+      counterparty: payment.counterparty,
+      direction: payment.type,
+      note: payment.note,
+      tag: tagToApply,
+      isHidden: false,
+    });
+  };
+
+  const handleSaveModalEdit = async () => {
     if (!selectedPayment || !onSaveOverride) return;
     setSavingOverride(true);
     try {
@@ -314,6 +432,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         ...prev,
         counterparty: editCounterparty.trim(),
         type: editDirection,
+        category: editCategory as PaymentCategory,
         note: editNote.trim(),
         tag: editTag.trim() || undefined,
         isOverridden: true,
@@ -341,521 +460,615 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   };
 
   return (
-    <div className="space-y-2.5">
-      {/* Header */}
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-slate-800 uppercase tracking-wider font-['Poppins',sans-serif]">
-            {t.recentPayments}
-          </span>
-          <span className="text-[11px] font-semibold text-slate-500 bg-slate-200/70 px-2 py-0.5 rounded-full">
-            {payments.length}
-          </span>
+    <div className="w-full max-w-full box-border space-y-3">
+      {/* 1. Direction Filter Segmented Bar: All, Received, Sent */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between px-1">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-800 uppercase tracking-wider font-['Poppins',sans-serif]">
+              {t.recentPayments}
+            </span>
+            <span className="text-[11px] font-semibold text-slate-500 bg-slate-200/70 px-2 py-0.5 rounded-full">
+              {filteredPayments.length}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {/* Search Toggle */}
+            <button
+              onClick={() => {
+                triggerHaptic();
+                setShowSearchInput(prev => !prev);
+              }}
+              className={`p-1.5 rounded-xl border transition-colors ${
+                showSearchInput || searchQuery 
+                  ? 'bg-emerald-50 border-emerald-300 text-[#14503F]' 
+                  : 'bg-white border-slate-200 text-slate-500 hover:text-slate-800'
+              }`}
+              title="Search transactions"
+            >
+              <Search size={14} />
+            </button>
+
+            {/* Statement Summary Copy Button */}
+            <button
+              onClick={handleCopySummary}
+              className="px-2 py-1 rounded-xl bg-white border border-slate-200 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-1 shadow-2xs transition-all active:scale-95"
+              title="Copy summary statement"
+            >
+              {copiedSummary ? <Check size={12} className="text-emerald-600" /> : <Share2 size={12} />}
+              <span className="hidden sm:inline">{copiedSummary ? 'Copied' : 'Share'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Direction Segmented Control */}
+        <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-200/80 rounded-2xl">
+          {/* All */}
+          <button
+            type="button"
+            onClick={() => handleSetDirection('all')}
+            className={`py-2 px-1 text-center rounded-xl transition-all font-bold text-xs flex flex-col items-center justify-center ${
+              currentDirection === 'all'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <span>{isAm ? 'ሁሉም' : 'All'}</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                currentDirection === 'all' ? 'bg-white/20 text-white' : 'bg-slate-300 text-slate-700'
+              }`}>
+                {payments.length}
+              </span>
+            </div>
+          </button>
+
+          {/* Received (In) */}
+          <button
+            type="button"
+            onClick={() => handleSetDirection('received')}
+            className={`py-2 px-1 text-center rounded-xl transition-all font-bold text-xs flex flex-col items-center justify-center ${
+              currentDirection === 'received'
+                ? 'bg-[#14503F] text-white shadow-sm ring-1 ring-emerald-500'
+                : 'text-emerald-800 hover:bg-emerald-50/60'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <ArrowDownLeft size={13} className="text-emerald-400" />
+              <span>{isAm ? 'ገቢ (In)' : 'Received'}</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                currentDirection === 'received' ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-900'
+              }`}>
+                {receivedCount}
+              </span>
+            </div>
+          </button>
+
+          {/* Sent (Out) */}
+          <button
+            type="button"
+            onClick={() => handleSetDirection('sent')}
+            className={`py-2 px-1 text-center rounded-xl transition-all font-bold text-xs flex flex-col items-center justify-center ${
+              currentDirection === 'sent'
+                ? 'bg-rose-950 text-white shadow-sm ring-1 ring-rose-500'
+                : 'text-rose-800 hover:bg-rose-50/60'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <ArrowUpRight size={13} className="text-rose-400" />
+              <span>{isAm ? 'ወጪ (Out)' : 'Sent'}</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                currentDirection === 'sent' ? 'bg-white/20 text-white' : 'bg-rose-100 text-rose-900'
+              }`}>
+                {sentCount}
+              </span>
+            </div>
+          </button>
+        </div>
+
+        {/* Search input field if toggled */}
+        {showSearchInput && (
+          <div className="relative animate-fadeIn">
+            <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              autoFocus
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder={isAm ? 'በስም፣ በባንክ ወይም በሪፈረንስ ፈልግ...' : 'Search by name, reference, bank or amount...'}
+              className="w-full pl-8 pr-8 py-2 rounded-xl bg-white border border-slate-300 text-xs font-semibold focus:outline-hidden focus:ring-2 focus:ring-[#14503F]"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Quick Category Filter Chips */}
+        <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 no-scrollbar">
+          {[
+            { id: 'all', label: isAm ? 'ሁሉም ዓይነቶች' : 'All Types' },
+            { id: 'transfer', label: isAm ? 'ዝውውር' : 'Transfers' },
+            { id: 'airtime', label: isAm ? 'አየር ሰዓት' : 'Airtime' },
+            { id: 'data', label: isAm ? 'ዳታ' : 'Data' },
+            { id: 'atm-card', label: isAm ? 'ATM/ካርድ' : 'ATM/Card' },
+            { id: 'bill', label: isAm ? 'ቢል' : 'Bills' },
+          ].map(cat => (
+            <button
+              key={cat.id}
+              onClick={() => {
+                triggerHaptic();
+                setSelectedCategory(cat.id);
+                setVisibleCount(50);
+              }}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-all ${
+                selectedCategory === cat.id
+                  ? 'bg-slate-800 text-white shadow-2xs'
+                  : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
         </div>
       </div>
 
       {/* Empty State */}
-      {payments.length === 0 && (
+      {filteredPayments.length === 0 && (
         <div className="bg-white rounded-2xl p-8 text-center border border-dashed border-slate-200">
           <CreditCard className="w-10 h-10 text-slate-300 mx-auto mb-2" />
           <div className="text-sm font-bold text-slate-700">{t.emptyPayments}</div>
           <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
-            {t.emptyPaymentsSub}
+            {searchQuery || currentDirection !== 'all' || selectedCategory !== 'all'
+              ? 'No transactions matched the selected filters. Tap another filter to see records.'
+              : t.emptyPaymentsSub}
           </p>
+          {(searchQuery || currentDirection !== 'all' || selectedCategory !== 'all') && (
+            <button
+              onClick={() => {
+                setInternalDirection('all');
+                onFilterDirection?.('all');
+                setSelectedCategory('all');
+                setSearchQuery('');
+              }}
+              className="mt-3 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-bold shadow-xs hover:bg-slate-800"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
       )}
 
       {/* Payment List */}
-      <div className="space-y-2">
-        {payments.slice(0, visibleCount).map(item => {
-          const brand = getBankBrand(item.bank);
+      <div className="space-y-2 w-full max-w-full">
+        {filteredPayments.slice(0, visibleCount).map(item => {
+          const brand: BankBrand = getBankBrand(item.bank);
           const isReceived = item.type === 'received';
           const isSent = item.type === 'sent';
-          const isUnknown = item.type === 'unknown';
-          const hasParsedAmount = item.amount > 0;
+          const rowTitle = getRowTitle(item);
+          const hasV2 = Boolean(item.v2Code);
+          const v2Link = item.v2Code ? `https://mbreciept.cbe.com.et/${item.v2Code}` : null;
 
           return (
             <div
               key={item.id}
               onClick={() => openPaymentModal(item)}
-              className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs hover:border-[#14503F]/30 hover:shadow-sm transition-all duration-150 cursor-pointer active:scale-[0.99] flex items-center justify-between gap-3 group"
+              style={{ boxSizing: 'border-box' }}
+              className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs hover:border-[#14503F]/40 hover:shadow-sm transition-all duration-150 cursor-pointer active:scale-[0.99] flex items-center justify-between gap-2.5 group w-full min-w-0"
             >
-              {/* Left Column: Sync Dot + Bank Logo Badge & Counterparty */}
-              <div className="flex items-center gap-2.5 min-w-0">
-                {/* Sync Dot */}
-                {getStatusDot(item.syncStatus)}
-
+              {/* Left Column: Bank LOGO + Title/Subtitle */}
+              <div className="flex items-center gap-2.5 min-w-0 flex-1">
                 {/* Bank Brand Logo Badge */}
-                <div
-                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border font-black text-[10.5px] shadow-2xs ${brand.badgeClass}`}
-                  title={brand.name}
-                >
-                  <span>{brand.shortCode}</span>
-                </div>
+                {brand.logoUrl ? (
+                  <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 border border-slate-200 shadow-2xs overflow-hidden group-hover:scale-105 transition-transform">
+                    <img 
+                      src={brand.logoUrl} 
+                      alt={brand.name} 
+                      className="w-full h-full object-contain"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none';
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border font-black text-[10.5px] shadow-2xs group-hover:scale-105 transition-transform ${brand.badgeClass}`}
+                    title={brand.name}
+                  >
+                    <span>{brand.shortCode}</span>
+                  </div>
+                )}
 
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-xs font-bold text-slate-900 truncate font-['Poppins',sans-serif]">
-                      {item.counterparty || item.senderAddress}
-                    </span>
-
-                    {/* Category Icon Badge (Airtime, Data, Bill, Cash, Transfer) */}
-                    {item.category && (
-                      <span className="inline-flex items-center gap-1 text-[9.5px] font-semibold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.5 rounded-md">
-                        {getCategoryIcon(item.category)}
-                        <span>{getCategoryLabel(item.category)}</span>
-                      </span>
-                    )}
-
-                    {/* Dedupe Badge (Rule 6) */}
-                    {item.isDuplicate && (
-                      <span className="inline-flex items-center text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded-md">
-                        Duplicate Ref
-                      </span>
-                    )}
-
-                    {/* Edited Badge (Rule 5) */}
+                {/* Title + Subtitle + Chips */}
+                <div className="min-w-0 flex-1">
+                  {/* Title Row (tappable to edit name) */}
+                  <div className="flex items-center gap-1 min-w-0">
+                    <button
+                      type="button"
+                      onClick={(e) => openInlineNameEdit(e, item)}
+                      className="text-left text-xs font-bold text-slate-900 truncate hover:text-[#14503F] hover:underline transition-colors font-['Poppins',sans-serif] block"
+                      title="Tap to edit counterparty name"
+                    >
+                      {rowTitle}
+                    </button>
                     {item.isOverridden && (
-                      <span className="inline-flex items-center text-[9px] font-bold bg-purple-50 text-purple-700 border border-purple-200 px-1 py-0.2 rounded-md">
+                      <span className="text-[9px] font-bold text-purple-700 bg-purple-50 px-1 py-0.2 rounded shrink-0">
                         Edited
                       </span>
                     )}
+                  </div>
 
-                    {/* Tag / Label Badge (Rule C4) */}
-                    {item.tag && (
-                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded-md">
-                        <TagIcon size={9} />
-                        {item.tag}
-                      </span>
+                  {/* Subtitle: Bank Short Name · Date Time · Ref */}
+                  <div className="flex items-center gap-1 text-[10.5px] text-slate-500 mt-0.5 truncate font-mono">
+                    <span className="font-bold text-slate-700">{brand.shortCode}</span>
+                    <span>·</span>
+                    <span>{formatDateTime(item.timestamp)}</span>
+                    {item.reference && (
+                      <>
+                        <span>·</span>
+                        <span className="text-slate-400 truncate max-w-[80px]">{item.reference}</span>
+                      </>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 truncate">
-                    <span className="font-medium text-slate-600">{item.bank}</span>
-                    <span>·</span>
-                    <span>{formatDateTime(item.timestamp)}</span>
-                  </div>
-
-                  {!hasParsedAmount && (
-                    <p className="text-[10px] text-slate-400 truncate max-w-xs mt-0.5 font-mono">
-                      {item.rawMessage}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {/* Right Column: Direction Arrow + Colored Amount + Status Badge */}
-              <div className="text-right shrink-0">
-                {hasParsedAmount ? (
-                  <div className="flex items-center justify-end gap-1 font-['Poppins',sans-serif]">
-                    {/* Small direction arrow */}
+                  {/* Chips Row: Direction Chip + Separate Category Chip + Tag / Tag Suggestion */}
+                  <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                    {/* Direction Chip */}
                     {isReceived && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-50 text-emerald-600">
-                        <ArrowDownLeft size={12} />
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 px-1.5 py-0.2 rounded-md">
+                        Received ↙
                       </span>
                     )}
                     {isSent && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-700">
-                        <ArrowUpRight size={12} />
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-rose-100 text-rose-900 border border-rose-300 px-1.5 py-0.2 rounded-md">
+                        Sent ↗
                       </span>
                     )}
-                    {isUnknown && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-50 text-amber-600">
-                        <HelpCircle size={12} />
+                    {!isReceived && !isSent && (
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-md">
+                        Unknown ?
                       </span>
                     )}
 
-                    <span className={`text-sm font-extrabold ${
-                      isReceived ? 'text-emerald-700' : isSent ? 'text-slate-900' : 'text-amber-700'
-                    }`}>
-                      {formatAmountCompact(item.amount, item.type)}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="text-xs font-mono font-bold text-slate-500">
-                    RAW SMS
-                  </div>
-                )}
+                    {/* Separate Category Chip */}
+                    {item.category && item.category !== 'received' && (
+                      <span className="inline-flex items-center text-[9px] font-semibold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-md">
+                        {getCategoryLabel(item.category)}
+                      </span>
+                    )}
 
-                {/* If Direction is unknown, prompt user clearly */}
-                {isUnknown && (
-                  <div className="mt-0.5 inline-flex items-center gap-0.5 text-[9.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-200">
-                    <AlertTriangle size={10} />
-                    <span>{isAm ? 'አልታወቀም' : 'Unknown Direction'}</span>
-                  </div>
-                )}
+                    {/* Tag Chip */}
+                    {item.tag && (
+                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded-md">
+                        <TagIcon size={8} />
+                        {item.tag}
+                      </span>
+                    )}
 
-                <div className="mt-1 flex items-center justify-end flex-wrap gap-1">
-                  {getSyncStatusBadge(item)}
-                  {item.v2Code && (
-                    <a
-                      href={`https://mbreciept.cbe.com.et/${item.v2Code}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="inline-flex items-center gap-0.5 text-[9.5px] font-bold text-[#14503F] hover:underline bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shadow-2xs"
-                    >
-                      <ExternalLink size={9} />
-                      <span>Open receipt</span>
-                    </a>
-                  )}
+                    {/* Suggested Tag */}
+                    {item.suggestedTag && !item.tag && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleApplySuggestedTag(item, item.suggestedTag!);
+                        }}
+                        className="inline-flex items-center gap-0.5 text-[9px] font-bold bg-amber-50 text-amber-800 border border-amber-300 border-dashed px-1.5 py-0.2 rounded-md hover:bg-amber-100 transition-colors"
+                        title="Click to apply suggested tag"
+                      >
+                        + Suggest: {item.suggestedTag}
+                      </button>
+                    )}
+
+                    {/* Duplicate Indicator */}
+                    {item.isDuplicate && (
+                      <span className="inline-flex items-center text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded-md">
+                        Duplicate
+                      </span>
+                    )}
+                  </div>
                 </div>
+              </div>
+
+              {/* Right Column: Amount + Status Badge */}
+              <div className="text-right shrink-0 flex flex-col items-end gap-1">
+                {/* Amount */}
+                <div className="text-sm font-black font-['Poppins',sans-serif] tracking-tight">
+                  <span className={isReceived ? 'text-emerald-700' : isSent ? 'text-rose-700' : 'text-slate-800'}>
+                    {formatAmountCompact(item.amount, item.type)}
+                  </span>
+                  <span className="text-[10px] text-slate-400 ml-0.5 font-normal">ETB</span>
+                </div>
+
+                {/* Server Sync / Result Badge */}
+                {getSyncStatusBadge(item)}
+
+                {/* Receipt Quick Link */}
+                {hasV2 && v2Link && (
+                  <a
+                    href={v2Link}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="inline-flex items-center gap-0.5 text-[9.5px] font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 px-1.5 py-0.2 rounded border border-purple-200 transition-colors"
+                  >
+                    <span>Receipt</span>
+                    <ExternalLink size={9} />
+                  </a>
+                )}
               </div>
             </div>
           );
         })}
       </div>
 
-
-      {/* Pagination Load More for 5,000+ items */}
-      {payments.length > visibleCount && (
-        <div className="pt-2 text-center">
-          <button
-            type="button"
-            onClick={() => setVisibleCount(prev => prev + 50)}
-            className="w-full py-2.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:text-[#14503F] hover:bg-slate-50 shadow-2xs transition-all"
-          >
-            Load more ({visibleCount} of {payments.length} shown)
-          </button>
-        </div>
+      {/* Pagination View More */}
+      {filteredPayments.length > visibleCount && (
+        <button
+          onClick={() => setVisibleCount(prev => prev + 50)}
+          className="w-full py-2.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-[#14503F] hover:bg-slate-50 transition-colors shadow-xs"
+        >
+          Load More ({filteredPayments.length - visibleCount} remaining)
+        </button>
       )}
 
-      {/* Payment Detail & Edit Modal */}
-      {selectedPayment && (
+      {/* Inline Name Edit Modal */}
+      {inlineEditPayment && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs ${getBankBadge(selectedPayment.bank).bg}`}>
-                  {getBankBadge(selectedPayment.bank).text}
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                    {selectedPayment.bank} · {selectedPayment.type === 'received' ? 'Received' : selectedPayment.type === 'sent' ? 'Sent' : 'Unknown'}
-                  </h3>
-                  <span className="text-[11px] text-slate-400">
-                    Sender: {selectedPayment.senderAddress} {selectedPayment.reference ? `· Ref: ${selectedPayment.reference}` : ''}
-                  </span>
-                </div>
-              </div>
+          <div className="bg-white w-full max-w-sm rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-3">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+                Set Counterparty Name
+              </h3>
               <button
-                onClick={() => setSelectedPayment(null)}
-                className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
+                onClick={() => setInlineEditPayment(null)}
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
               >
-                <X size={16} />
+                <X size={15} />
               </button>
             </div>
 
-            {/* Big Amount & Duplicate Notice */}
-            <div className="bg-[#14503F]/5 rounded-2xl p-4 text-center border border-[#14503F]/10 space-y-1">
-              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                {selectedPayment.type === 'received' ? 'Total Received' : selectedPayment.type === 'sent' ? 'Total Sent' : 'Transaction Amount'}
+            <p className="text-[11px] text-slate-500">
+              Provide the customer or merchant name for this {inlineEditPayment.bank} transaction:
+            </p>
+
+            <input
+              type="text"
+              autoFocus
+              value={inlineName}
+              onChange={e => setInlineName(e.target.value)}
+              placeholder="e.g. Bilal Seid / Usmeal Abdela"
+              className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-hidden focus:ring-2 focus:ring-[#14503F]"
+            />
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setInlineEditPayment(null)}
+                className="flex-1 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={savingOverride}
+                onClick={handleSaveInlineName}
+                className="flex-1 py-2 rounded-xl bg-[#14503F] text-white text-xs font-bold hover:bg-[#0e3b2e]"
+              >
+                {savingOverride ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full Transaction Receipt Modal */}
+      {selectedPayment && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4 max-h-[92dvh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Receipt className="w-5 h-5 text-[#14503F]" />
+                <span className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
+                  Transaction Receipt
+                </span>
               </div>
-              <div className="text-2xl font-extrabold text-[#14503F] font-['Poppins',sans-serif]">
-                {selectedPayment.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB
+              <button
+                onClick={() => setSelectedPayment(null)}
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {/* Main Info Card */}
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Amount</div>
+                  <div className={`text-2xl font-black font-['Poppins',sans-serif] ${
+                    selectedPayment.type === 'received' ? 'text-emerald-700' : 'text-rose-700'
+                  }`}>
+                    {selectedPayment.type === 'received' ? '+' : '-'}{selectedPayment.amount.toFixed(2)} ETB
+                  </div>
+                </div>
+                {getSyncStatusBadge(selectedPayment)}
               </div>
-              {selectedPayment.isDuplicate && (
-                <div className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
-                  <AlertTriangle size={12} />
-                  <span>Duplicate Ref (Excluded from total balances)</span>
+
+              <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-slate-200">
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Bank:</span>
+                  <span className="font-bold text-slate-800">{selectedPayment.bank}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Direction:</span>
+                  <span className="font-bold capitalize text-slate-800">{selectedPayment.type}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Counterparty:</span>
+                  <span className="font-bold text-slate-800">{selectedPayment.counterparty || 'None extracted'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Reference / FT:</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-mono font-bold text-slate-800 break-all">{selectedPayment.reference || 'None'}</span>
+                    {selectedPayment.reference && (
+                      <button
+                        onClick={() => handleCopy(selectedPayment.reference)}
+                        className="text-slate-400 hover:text-slate-700 p-0.5"
+                        title="Copy Reference"
+                      >
+                        {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {selectedPayment.v2Code && (
+                <div className="pt-2 border-t border-slate-200">
+                  <a
+                    href={`https://mbreciept.cbe.com.et/${selectedPayment.v2Code}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full py-2 px-3 rounded-xl bg-purple-700 text-white text-xs font-bold shadow-xs hover:bg-purple-800 flex items-center justify-center gap-1.5"
+                  >
+                    <span>Open Official CBE Receipt</span>
+                    <ExternalLink size={13} />
+                  </a>
                 </div>
               )}
             </div>
 
-            {/* Edit Transaction Section (Rule 5) */}
-            {isEditing ? (
-              <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
-                    {isAm ? 'ክፍያውን ያስተካክሉ' : 'Edit Transaction Info'}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsEditing(false)}
-                    className="text-xs text-slate-500 hover:text-slate-800"
-                  >
-                    Cancel
-                  </button>
-                </div>
+            {/* Quick Actions: Share, Edit, Hide */}
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => handleSharePaymentReceipt(selectedPayment)}
+                className="py-2 px-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center justify-center gap-1 shadow-2xs"
+              >
+                <Share2 size={13} />
+                <span>{copied ? 'Copied ✓' : 'Share'}</span>
+              </button>
 
-                {/* Counterparty name */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-700">Counterparty Name</label>
+              <button
+                type="button"
+                onClick={() => setIsEditing(true)}
+                className="py-2 px-2 rounded-xl border border-slate-300 text-slate-800 text-xs font-bold hover:bg-slate-50 flex items-center justify-center gap-1 shadow-2xs"
+              >
+                <Edit2 size={13} />
+                <span>Edit</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleHidePayment}
+                className="py-2 px-2 rounded-xl border border-rose-200 text-rose-700 text-xs font-bold hover:bg-rose-50 flex items-center justify-center gap-1 shadow-2xs"
+              >
+                <EyeOff size={13} />
+                <span>Hide</span>
+              </button>
+            </div>
+
+            {/* Edit Section Drawer */}
+            {isEditing && (
+              <div className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-3">
+                <div className="text-xs font-bold text-slate-900">Edit Override</div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">Party Name</label>
                   <input
                     type="text"
                     value={editCounterparty}
                     onChange={e => setEditCounterparty(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold focus:outline-none focus:border-[#14503F]"
-                    placeholder="Customer / Merchant Name"
+                    placeholder="Enter counterparty name..."
+                    className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-medium focus:ring-2 focus:ring-[#14503F]"
                   />
                 </div>
 
-                {/* Direction Buttons */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-700">Direction</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditDirection('received')}
-                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
-                        editDirection === 'received'
-                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                          : 'bg-white text-slate-700 border-slate-200'
-                      }`}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Direction</label>
+                    <select
+                      value={editDirection}
+                      onChange={e => setEditDirection(e.target.value as PaymentType)}
+                      className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-medium"
                     >
-                      <ArrowDownLeft size={13} />
-                      <span>Received</span>
-                    </button>
+                      <option value="received">Received (In)</option>
+                      <option value="sent">Sent (Out)</option>
+                      <option value="unknown">Unknown</option>
+                    </select>
+                  </div>
 
-                    <button
-                      type="button"
-                      onClick={() => setEditDirection('sent')}
-                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
-                        editDirection === 'sent'
-                          ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                          : 'bg-white text-slate-700 border-slate-200'
-                      }`}
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Category</label>
+                    <select
+                      value={editCategory}
+                      onChange={e => setEditCategory(e.target.value)}
+                      className="w-full px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-medium"
                     >
-                      <ArrowUpRight size={13} />
-                      <span>Sent</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setEditDirection('unknown')}
-                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all flex items-center justify-center gap-1 ${
-                        editDirection === 'unknown'
-                          ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                          : 'bg-white text-slate-700 border-slate-200'
-                      }`}
-                    >
-                      <HelpCircle size={13} />
-                      <span>Unknown</span>
-                    </button>
+                      <option value="transfer">Transfer</option>
+                      <option value="airtime">Airtime</option>
+                      <option value="data">Data Package</option>
+                      <option value="atm-card">ATM / Card</option>
+                      <option value="bill">Bill Payment</option>
+                    </select>
                   </div>
                 </div>
 
-                {/* Note / Reason */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-slate-700">Note / Reason</label>
-                  <input
-                    type="text"
-                    value={editNote}
-                    onChange={e => setEditNote(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-[#14503F]"
-                    placeholder="e.g. Shop sales, supplier payout"
-                  />
-                </div>
-
-                {/* Tag / Label Selection (Rule C4) */}
-                <div className="space-y-1.5 pt-1 border-t border-slate-200/60">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
-                      <TagIcon size={12} className="text-[#14503F]" />
-                      <span>Tag / Label</span>
-                    </label>
-                    {editTag && (
-                      <button
-                        type="button"
-                        onClick={() => setEditTag('')}
-                        className="text-[10px] text-slate-400 hover:text-slate-600 underline"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {COMMON_TAGS.map(t => {
-                      const isSel = editTag.toLowerCase() === t.toLowerCase();
-                      return (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => setEditTag(isSel ? '' : t)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all border ${
-                            isSel
-                              ? 'bg-[#14503F] text-white border-[#14503F] shadow-xs'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                          }`}
-                        >
-                          {t}
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">Tag / Category</label>
                   <input
                     type="text"
                     value={editTag}
                     onChange={e => setEditTag(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-[#14503F]"
-                    placeholder="Or type custom label..."
+                    placeholder="e.g. WiFi, Rent, Salary..."
+                    className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-medium"
                   />
-                  <p className="text-[10px] text-slate-400">
-                    💡 Tagging remembers this label for &ldquo;{editCounterparty || 'this sender'}&rdquo; on future transactions.
-                  </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleSaveEdit}
-                  disabled={savingOverride}
-                  className="w-full py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-sm hover:bg-[#0e3b2e] flex items-center justify-center gap-1.5"
-                >
-                  <Check size={14} />
-                  <span>{savingOverride ? 'Saving to SQLite...' : 'Save Changes'}</span>
-                </button>
-              </div>
-            ) : (
-              <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 space-y-2 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Counterparty:</span>
-                  <span className="font-bold text-slate-900">{selectedPayment.counterparty}</span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Direction:</span>
-                  <span className={`font-bold capitalize ${
-                    selectedPayment.type === 'received' ? 'text-emerald-700' : selectedPayment.type === 'sent' ? 'text-slate-900' : 'text-amber-700'
-                  }`}>
-                    {selectedPayment.type}
-                  </span>
-                </div>
-
-                {selectedPayment.tag && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500">Label / Tag:</span>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 px-2 py-0.5 rounded-full">
-                      <TagIcon size={10} />
-                      {selectedPayment.tag}
-                    </span>
-                  </div>
-                )}
-
-                {selectedPayment.balance !== undefined && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500">SMS Stated Balance:</span>
-                    <span className="font-mono font-bold text-slate-800">
-                      ETB {selectedPayment.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                )}
-
-                {selectedPayment.note && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500">Note:</span>
-                    <span className="font-medium text-slate-800">{selectedPayment.note}</span>
-                  </div>
-                )}
-
-                {selectedPayment.reference && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500">Ref / FT Number:</span>
-                    <span className="font-mono font-bold text-slate-900 select-all">{selectedPayment.reference}</span>
-                  </div>
-                )}
-
-                {selectedPayment.v2Code && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500">CBE v2 Link:</span>
-                    <a
-                      href={`https://mbreciept.cbe.com.et/${selectedPayment.v2Code}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] font-bold text-[#14503F] hover:underline bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md"
-                    >
-                      <ExternalLink size={11} />
-                      <span>Open receipt ({selectedPayment.v2Code})</span>
-                    </a>
-                  </div>
-                )}
-
-                {selectedPayment.serverResult && (
-                  <div className="p-2.5 rounded-xl bg-white border border-slate-200 space-y-1 text-[11px]">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500 font-medium">Server Reply:</span>
-                      <span className={`font-bold ${
-                        selectedPayment.serverResult.status === 'Saved' 
-                          ? 'text-emerald-700' 
-                          : selectedPayment.serverResult.status === 'Ignored' 
-                            ? 'text-amber-800' 
-                            : 'text-slate-700'
-                      }`}>
-                        {selectedPayment.serverResult.status} (HTTP {selectedPayment.serverResult.httpCode})
-                      </span>
-                    </div>
-                    {selectedPayment.serverResult.reason && (
-                      <p className="text-slate-600 font-mono text-[10px]">
-                        Reason: {selectedPayment.serverResult.reason}
-                      </p>
-                    )}
-                    {selectedPayment.serverResult.resolving && (
-                      <span className="inline-block text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200 font-semibold">
-                        FT resolution in progress on server
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                <div className="pt-2 border-t border-slate-200 flex items-center gap-2">
+                <div className="flex gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => setIsEditing(true)}
-                    className="flex-1 py-1.5 px-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center justify-center gap-1"
+                    onClick={() => setIsEditing(false)}
+                    className="flex-1 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600"
                   >
-                    <Edit3 size={12} />
-                    <span>Edit Name / Tag</span>
+                    Cancel
                   </button>
-
                   <button
                     type="button"
-                    onClick={handleHidePayment}
-                    className="py-1.5 px-2.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs flex items-center justify-center gap-1"
-                    title="Hide promotional or non-payment SMS"
+                    disabled={savingOverride}
+                    onClick={handleSaveModalEdit}
+                    className="flex-1 py-1.5 rounded-lg bg-[#14503F] text-white text-xs font-bold hover:bg-[#0e3b2e]"
                   >
-                    <EyeOff size={12} />
-                    <span>Not a payment</span>
+                    {savingOverride ? 'Saving...' : 'Save Changes'}
                   </button>
                 </div>
               </div>
             )}
 
-            {/* RAW SMS Body (Never Changed) */}
-            <div className="space-y-1.5">
+            {/* Raw SMS Box */}
+            <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-800">Raw Bank SMS:</span>
+                <span className="text-[10px] font-bold uppercase text-slate-400">Original Bank SMS</span>
                 <button
                   type="button"
                   onClick={() => handleCopy(selectedPayment.rawMessage)}
-                  className="text-[11px] text-[#14503F] font-bold hover:underline flex items-center gap-1"
+                  className="text-[10px] text-slate-500 hover:text-slate-800 flex items-center gap-1 font-semibold"
                 >
-                  {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
-                  <span>{copied ? 'Copied' : 'Copy Text'}</span>
+                  {copied ? <Check size={11} className="text-emerald-600" /> : <Copy size={11} />}
+                  <span>{copied ? 'Copied' : 'Copy SMS'}</span>
                 </button>
               </div>
-              <div className="bg-slate-900 text-slate-100 p-3 rounded-2xl font-mono text-xs leading-relaxed break-words border border-slate-800 select-all">
+              <div className="bg-slate-900 text-slate-100 p-3 rounded-xl font-mono text-[11px] leading-relaxed break-words max-h-36 overflow-y-auto">
                 {selectedPayment.rawMessage}
               </div>
-            </div>
-
-            {/* Bottom Actions */}
-            <div className="pt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleManualRetry(selectedPayment)}
-                disabled={retryingId === selectedPayment.id}
-                className="flex-1 py-2.5 px-3 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e] disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
-              >
-                <RefreshCw size={14} className={retryingId === selectedPayment.id ? 'animate-spin' : ''} />
-                <span>{retryingId === selectedPayment.id ? 'Retrying via Sync.run()...' : 'Retry Now'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSelectedPayment(null)}
-                className="py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200"
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>

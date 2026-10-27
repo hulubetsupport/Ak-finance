@@ -52,6 +52,17 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void setupJavascriptBridge() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            getWindow().setStatusBarColor(android.graphics.Color.parseColor("#F4F7F5"));
+            android.view.View decor = getWindow().getDecorView();
+            int flags = decor.getSystemUiVisibility() | android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags |= android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                getWindow().setNavigationBarColor(android.graphics.Color.parseColor("#F4F7F5"));
+            }
+            decor.setSystemUiVisibility(flags);
+        }
         if (getBridge() != null && getBridge().getWebView() != null) {
             getBridge().getWebView().setBackgroundColor(android.graphics.Color.parseColor("#F4F7F5"));
             getBridge().getWebView().addJavascriptInterface(new AndroidNativeBridge(this), "AndroidBridge");

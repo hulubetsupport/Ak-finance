@@ -35,6 +35,13 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   // Requirement E3: Secret key off by default
   const [includeSecretKey, setIncludeSecretKey] = useState(false);
 
+  // Helper for real-time filename with exact date and seconds
+  const getDetailedTimestamp = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  };
+
   // Requirement E4: Restore preview & confirmation state
   const [pendingRestore, setPendingRestore] = useState<{
     rawJson: string;
@@ -43,6 +50,13 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     banksCount: number;
     tagsCount: number;
     hasSecretKey: boolean;
+    exportedAt?: string;
+    financialSummary?: {
+      totalReceivedETB?: string;
+      totalSentETB?: string;
+      netCashETB?: string;
+      currency?: string;
+    };
   } | null>(null);
 
   const [confirmReplaceText, setConfirmReplaceText] = useState('');
@@ -57,14 +71,14 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     return `${(bytes / 1024).toFixed(1)} KB`;
   };
 
-  // Requirement E1 & E2: Native SAF/FileProvider export with write-back verification
+  // Requirement E1 & E2: Native SAF/FileProvider export with write-back verification & real-time seconds
   const handleExportBackup = async (shareDirectly: boolean = false) => {
     setLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
       const json = await db.exportFullBackupJson(includeSecretKey);
-      const filename = `ak_finance_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      const filename = `ak_finance_backup_${getDetailedTimestamp()}.json`;
       const inspection = db.inspectBackupJson(json);
 
       if (shareDirectly) {
@@ -72,7 +86,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         if (shared) {
           const byteLen = new Blob([json]).size;
           setSuccessMsg(
-            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(byteLen)} (Shared)`
+            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(byteLen)} (Shared as ${filename})`
           );
         } else {
           setErrorMsg('Failed to open system share sheet.');
@@ -81,7 +95,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         const res = await saveNativeFile(filename, 'application/json', json);
         if (res.success && res.bytes && res.bytes > 0) {
           setSuccessMsg(
-            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(res.bytes)}`
+            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(res.bytes)} (${filename})`
           );
         } else {
           setErrorMsg(res.error || 'Export failed: written file was 0 bytes.');
@@ -94,27 +108,27 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     }
   };
 
-  // Requirement E5: UTF-8 BOM CSV export with write verification
+  // Requirement E5: UTF-8 BOM CSV export with real-time seconds
   const handleExportCsv = async (shareDirectly: boolean = false) => {
     setLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
       const csv = await db.exportPaymentsCsv();
-      const filename = `ak_finance_payments_${new Date().toISOString().slice(0, 10)}.csv`;
+      const filename = `ak_finance_payments_${getDetailedTimestamp()}.csv`;
 
       if (shareDirectly) {
         const shared = await shareNativeFile(filename, 'text/csv;charset=utf-8;', csv);
         if (shared) {
           const byteLen = new Blob([csv]).size;
-          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(byteLen)} (Shared)`);
+          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(byteLen)} (${filename})`);
         } else {
           setErrorMsg('Failed to open share sheet.');
         }
       } else {
         const res = await saveNativeFile(filename, 'text/csv;charset=utf-8;', csv);
         if (res.success && res.bytes && res.bytes > 0) {
-          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(res.bytes)} with UTF-8 BOM`);
+          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(res.bytes)} with UTF-8 BOM (${filename})`);
         } else {
           setErrorMsg(res.error || 'CSV export failed (0 bytes).');
         }
@@ -126,7 +140,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     }
   };
 
-  // Requirement E4: Restore file chosen -> inspect and show summary
+  // Requirement E4: Restore file chosen -> inspect and show summary with real-time details
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -142,6 +156,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         return;
       }
 
+      const data = inspection.data || {};
       setPendingRestore({
         rawJson: text,
         version: inspection.version || 1,
@@ -149,6 +164,8 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         banksCount: inspection.banksCount,
         tagsCount: inspection.tagsCount,
         hasSecretKey: inspection.hasSecretKey,
+        exportedAt: data.exportedAtLocal || data.exportedAt || undefined,
+        financialSummary: data.financialSummary,
       });
       setShowReplaceConfirm(false);
       setConfirmReplaceText('');
@@ -255,9 +272,24 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                 <span className="font-bold text-[#14503F]">{pendingRestore.banksCount} banks</span>,{' '}
                 <span className="font-bold text-[#14503F]">{pendingRestore.tagsCount} tags</span>
               </p>
+              {pendingRestore.exportedAt && (
+                <p className="text-[11px] text-slate-600 font-mono">
+                  Exported: <span className="font-bold text-slate-800">{pendingRestore.exportedAt}</span>
+                </p>
+              )}
+              {pendingRestore.financialSummary && (
+                <div className="text-[10.5px] text-emerald-900 font-mono bg-emerald-50/80 p-1.5 rounded-lg border border-emerald-100 flex items-center justify-between">
+                  <span>In: +ETB {pendingRestore.financialSummary.totalReceivedETB || '0.00'}</span>
+                  <span>Out: -ETB {pendingRestore.financialSummary.totalSentETB || '0.00'}</span>
+                  <span className="font-bold">Net: ETB {pendingRestore.financialSummary.netCashETB || '0.00'}</span>
+                </div>
+              )}
               <p className="text-[11px] text-slate-500">
                 Schema Version: {pendingRestore.version} · Secret Key in backup: {pendingRestore.hasSecretKey ? 'Yes' : 'No'}
               </p>
+              <div className="text-[10px] text-emerald-800 font-medium pt-1 flex items-center gap-1">
+                <span>🛡️ Zero data loss: Auto-snapshot saved before restore.</span>
+              </div>
               <p className="text-[11px] text-amber-800 font-medium pt-1">
                 Choose how to apply this backup:
               </p>

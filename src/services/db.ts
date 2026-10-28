@@ -273,9 +273,25 @@ class DatabaseService {
       }
 
       const isHidden = ov ? !!ov.isHidden : false;
-      const counterparty = ov?.counterparty || parsed.counterparty;
-      const type = (ov?.direction as any) || parsed.type;
+      let counterparty = ov?.counterparty || parsed.counterparty;
+      let type = (ov?.direction as any) || parsed.type;
+      let category = parsed.category;
       const note = ov?.note || undefined;
+
+      const isServerIgnoredNonPayment = Boolean(
+        serverResultObj && (
+          serverResultObj.status === 'Ignored' || 
+          (serverResultObj.reason && /not\s*a\s*payment|not\s*financial|ignored/i.test(serverResultObj.reason))
+        )
+      );
+
+      if ((isServerIgnoredNonPayment || parsed.amount === 0) && (category === 'other' || category === 'transfer' || category === 'alert')) {
+        category = 'alert';
+        type = 'unknown';
+        if (!counterparty || counterparty.toLowerCase().includes('unknown')) {
+          counterparty = parsed.bank === 'BOA' ? 'BOA Service Alert' : `${parsed.bank} Service Alert`;
+        }
+      }
 
       // Fix Tag Bug (Part B):
       // Only remember tags by a real non-empty counterparty name (or account tail).
@@ -302,7 +318,7 @@ class DatabaseService {
         senderAddress: msg.sender || '',
         bank: parsed.bank,
         type,
-        category: parsed.category,
+        category,
         amount: parsed.amount,
         amountCents: parsed.amountCents,
         amountSantim: parsed.amountSantim ?? parsed.amountCents,
@@ -733,7 +749,7 @@ class DatabaseService {
   }
 
   public async exportFullBackupJson(includeSecretKey: boolean = false): Promise<string> {
-    const [messages, serverResults, openingBalances, overrides, senderBankMap, counterpartyTags, withdrawals, settings] = await Promise.all([
+    const [messages, serverResults, openingBalances, overrides, senderBankMap, counterpartyTags, withdrawals, settings, allPayments] = await Promise.all([
       getNativeMessages(),
       getNativeServerResults(),
       getNativeOpeningBalances(),
@@ -742,6 +758,7 @@ class DatabaseService {
       getNativeCounterpartyTags(),
       this.getAllWithdrawals(),
       this.getSettings(),
+      this.getAllPayments(true),
     ]);
 
     let customAccounts: any[] = [];
@@ -750,13 +767,40 @@ class DatabaseService {
       if (stored) customAccounts = JSON.parse(stored);
     } catch {}
 
+    let totalReceivedCents = 0;
+    let totalSentCents = 0;
+    for (const p of allPayments) {
+      if (p.isDuplicate || p.isHidden) continue;
+      const c = p.amountCents ?? Math.round(p.amount * 100);
+      if (p.type === 'received') totalReceivedCents += c;
+      else if (p.type === 'sent') totalSentCents += c;
+    }
+
+    const now = new Date();
     const backup = {
       app: 'Ak Finance',
       version: 4,
       appVersion: '2.0.0',
-      exportedAt: new Date().toISOString(),
+      exportedAt: now.toISOString(),
+      exportedAtISO: now.toISOString(),
+      exportedAtLocal: now.toLocaleString('en-US', {
+        dateStyle: 'full',
+        timeStyle: 'long',
+      }),
+      exportedTimestamp: now.getTime(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Addis_Ababa',
+      deviceTimeFormatted: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      financialSummary: {
+        totalTransactions: allPayments.length,
+        nonDuplicateCount: allPayments.filter(p => !p.isDuplicate).length,
+        totalReceivedETB: (totalReceivedCents / 100).toFixed(2),
+        totalSentETB: (totalSentCents / 100).toFixed(2),
+        netCashETB: ((totalReceivedCents - totalSentCents) / 100).toFixed(2),
+        currency: 'ETB',
+        activeBanksCount: Object.keys(openingBalances).length || 5,
+      },
       stats: {
-        paymentsCount: messages.length,
+        paymentsCount: messages.length || allPayments.length,
         banksCount: Object.keys(openingBalances).length || 5,
         tagsCount: Object.keys(counterpartyTags).length,
       },
@@ -765,6 +809,34 @@ class DatabaseService {
         // Requirement E3: Secret key off by default; replace with "" if not requested
         secretKey: includeSecretKey ? (settings.secretKey || '') : '',
       },
+      // Real-time detailed parsed transactions with all fields
+      payments: allPayments.map(p => ({
+        id: p.id,
+        sender: p.senderAddress,
+        body: p.rawMessage,
+        timestamp: p.timestamp,
+        dateFormatted: p.date,
+        bank: p.bank,
+        direction: p.type,
+        amount: p.amount,
+        amountFormatted: p.amount.toFixed(2),
+        currency: p.currency || 'ETB',
+        counterparty: p.counterparty || '',
+        category: p.category,
+        reference: p.reference,
+        ftNumber: p.ftNumber,
+        v2Code: p.v2Code,
+        balance: p.balance,
+        extractedBalance: p.extractedBalance,
+        serverStatus: p.serverResult?.status || (p.syncStatus === 'sent' ? 'Saved' : p.syncStatus === 'pending' ? 'Pending' : 'Failed'),
+        serverResult: p.serverResult || null,
+        tag: p.tag || '',
+        note: p.note || '',
+        isDuplicate: Boolean(p.isDuplicate),
+        isHidden: Boolean(p.isHidden),
+        isOverridden: Boolean(p.isOverridden),
+      })),
+      // Raw SQLite tables for native database restores
       messages,
       serverResults,
       openingBalances,
@@ -808,7 +880,9 @@ class DatabaseService {
         };
       }
 
-      const paymentsCount = Array.isArray(data.messages) ? data.messages.length : 0;
+      const paymentsCount = Array.isArray(data.payments) && data.payments.length > 0
+        ? data.payments.length
+        : (Array.isArray(data.messages) ? data.messages.length : 0);
       const banksCount = data.openingBalances && typeof data.openingBalances === 'object'
         ? Object.keys(data.openingBalances).length
         : (data.senderBankMap ? Object.keys(data.senderBankMap).length : 5);
@@ -851,6 +925,13 @@ class DatabaseService {
     let restoredPaymentsCount = 0;
 
     try {
+      // Safe update & restore: auto snapshot current state before executing any changes
+      try {
+        const safetySnapshot = await this.exportFullBackupJson(true);
+        localStorage.setItem('ak_finance_safety_snapshot', safetySnapshot);
+        localStorage.setItem('ak_finance_safety_snapshot_time', new Date().toISOString());
+      } catch {}
+
       // 1. Opening Balances
       if (data.openingBalances && typeof data.openingBalances === 'object') {
         for (const [bank, amount] of Object.entries(data.openingBalances)) {
@@ -928,8 +1009,15 @@ class DatabaseService {
         } catch {}
       }
 
-      // 7. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates: same sender + body + timestamp)
-      if (Array.isArray(data.messages) && data.messages.length > 0) {
+      // 7. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates)
+      const msgSource: Array<{ sender: string; body: string }> = 
+        (Array.isArray(data.messages) && data.messages.length > 0)
+          ? data.messages
+          : (Array.isArray(data.payments) && data.payments.length > 0)
+            ? data.payments.map((p: any) => ({ sender: p.sender || 'UNKNOWN', body: p.body || p.rawMessage || '' }))
+            : [];
+
+      if (msgSource.length > 0) {
         const existingMessages = await getNativeMessages();
 
         // Create deduplication set for fast lookup
@@ -939,7 +1027,7 @@ class DatabaseService {
           existingKeySet.add(`${(em.sender || '').toLowerCase()}|${bodyNorm}`);
         }
 
-        for (const m of data.messages) {
+        for (const m of msgSource) {
           if (!m || !m.sender || !m.body) continue;
           const key = `${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}`;
 

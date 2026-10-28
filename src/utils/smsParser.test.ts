@@ -119,3 +119,43 @@ test('All 8 OFFICIAL_PARSER_BENCHMARKS execute cleanly without error', () => {
     assert.equal(res.amount, sample.expectedAmount);
   }
 });
+
+test('CBE Received: extracts sender name from "by <NAME> with txn id"', () => {
+  const sms = 'Dear Customer, your account 10001199 has been Credited with ETB 3,700.00 on 28-OCT-2026 by MERON TESHOME with txn id FT26301G31YR. Your current balance is ETB 12,500.00.';
+  const parsed = parseBankSms('CBE', sms);
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'received');
+  assert.equal(parsed.amount, 3700.0);
+  assert.equal(parsed.counterparty, 'MERON TESHOME');
+  assert.equal(parsed.ftNumber, 'FT26301G31YR');
+});
+
+test('CBE Sent: extracts receiver name from "transferred to <NAME>"', () => {
+  const sms = 'Dear Customer, ETB 1,960.00 debited from your account 10009427 for transfer to WUBET MESENBET with txn id FT26301TY15D on 28-OCT-2026. Available balance ETB 4,120.50.';
+  const parsed = parseBankSms('CBE', sms);
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'sent');
+  assert.equal(parsed.amount, 1960.0);
+  assert.equal(parsed.counterparty, 'WUBET MESENBET');
+  assert.equal(parsed.ftNumber, 'FT26301TY15D');
+});
+
+test('CBE Amharic: extracts sender name from "በ <Name> በኩል"', () => {
+  const sms = 'ውድ ደንበኛችን በ 28/10/2026 የ 3,700.00 ብር ገቢ በ Meron Teshome በኩል በ FT26301G31YR ተላልፎልዎታል። ቀሪ ሂሳብዎ 12,500.00 ብር ነው።';
+  const parsed = parseBankSms('CBE', sms);
+  assert.equal(parsed.bank, 'CBE');
+  assert.equal(parsed.type, 'received');
+  assert.equal(parsed.amount, 3700.0);
+  assert.equal(parsed.counterparty, 'Meron Teshome');
+  assert.equal(parsed.ftNumber, 'FT26301G31YR');
+});
+
+test('BOA Alert: non-financial SMS marked as category "alert" and type "unknown"', () => {
+  const sms = 'Dear Customer, your Internet Banking account has been logged in on 28-OCT-2026 13:47 from IP 196.188.12.4. If this was not you, please call 8335 immediately.';
+  const parsed = parseBankSms('BOA', sms);
+  assert.equal(parsed.bank, 'Bank of Abyssinia');
+  assert.equal(parsed.category, 'alert');
+  assert.equal(parsed.type, 'unknown');
+  assert.equal(parsed.amount, 0);
+});
+

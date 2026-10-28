@@ -92,8 +92,15 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   // Performance pagination
   const [visibleCount, setVisibleCount] = useState(50);
 
+  // Non-transaction alerts toggle (hide/show)
+  const [hideAlerts, setHideAlerts] = useState(false);
+
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
+
+  const alertCount = useMemo(() => {
+    return payments.filter(p => p.category === 'alert' || p.amount === 0 || p.serverResult?.status === 'Ignored').length;
+  }, [payments]);
 
   const triggerHaptic = () => {
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -118,13 +125,19 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         return false;
       }
 
-      // 2. Category filter
+      // 2. Category filter & Alert option
+      const isItemAlert = p.category === 'alert' || p.amount === 0 || p.serverResult?.status === 'Ignored';
+
       if (selectedCategory !== 'all') {
         if (selectedCategory === 'airtime' && p.category !== 'airtime') return false;
         if (selectedCategory === 'data' && p.category !== 'data') return false;
         if (selectedCategory === 'atm-card' && p.category !== 'atm-card') return false;
         if (selectedCategory === 'bill' && p.category !== 'bill') return false;
-        if (selectedCategory === 'transfer' && p.category !== 'transfer' && p.category !== undefined) return false;
+        if (selectedCategory === 'transfer' && (p.category !== 'transfer' && p.category !== undefined)) return false;
+        if (selectedCategory === 'alert' && !isItemAlert) return false;
+      } else if (hideAlerts && isItemAlert) {
+        // Exclude alert messages when user toggles "Hide Alerts"
+        return false;
       }
 
       // 3. Search query
@@ -143,23 +156,23 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
       return true;
     });
-  }, [payments, currentDirection, selectedCategory, searchQuery]);
+  }, [payments, currentDirection, selectedCategory, searchQuery, hideAlerts]);
 
-  // Totals for direction chips
+  // Totals for direction chips (exclude alert non-payments)
   const totalReceived = useMemo(() => {
     return payments
-      .filter(p => p.type === 'received' && !p.isDuplicate && !p.isHidden)
+      .filter(p => p.type === 'received' && !p.isDuplicate && !p.isHidden && p.category !== 'alert')
       .reduce((sum, p) => sum + (p.amount || 0), 0);
   }, [payments]);
 
   const totalSent = useMemo(() => {
     return payments
-      .filter(p => p.type === 'sent' && !p.isDuplicate && !p.isHidden)
+      .filter(p => p.type === 'sent' && !p.isDuplicate && !p.isHidden && p.category !== 'alert')
       .reduce((sum, p) => sum + (p.amount || 0), 0);
   }, [payments]);
 
-  const receivedCount = useMemo(() => payments.filter(p => p.type === 'received').length, [payments]);
-  const sentCount = useMemo(() => payments.filter(p => p.type === 'sent').length, [payments]);
+  const receivedCount = useMemo(() => payments.filter(p => p.type === 'received' && p.category !== 'alert').length, [payments]);
+  const sentCount = useMemo(() => payments.filter(p => p.type === 'sent' && p.category !== 'alert').length, [payments]);
 
   const formatAmountCompact = (num: number, type: PaymentType) => {
     if (settings.hideBalances) return '••••';
@@ -204,6 +217,15 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         );
       }
       if (sr.status === 'Ignored') {
+        const isAlertOrNonPayment = item.category === 'alert' || item.amount === 0 || (sr.reason && /not\s*a\s*payment/i.test(sr.reason));
+        if (isAlertOrNonPayment) {
+          return (
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-300" title={sr.reason || 'Non-financial notification'}>
+              <Info size={11} className="text-slate-500" />
+              <span>Bank Alert</span>
+            </span>
+          );
+        }
         return (
           <div className="inline-flex items-center gap-1">
             <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-300" title={sr.reason || 'Ignored by server'}>
@@ -329,6 +351,11 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     const cp = (item.counterparty || '').trim();
     const tail = item.accountNumber ? `acct …${item.accountNumber.slice(-4)}` : '';
 
+    if (item.category === 'alert' || item.amount === 0 || item.serverResult?.status === 'Ignored') {
+      if (cp && !cp.toLowerCase().includes('unknown')) return cp;
+      return isAm ? `${item.bank || 'ባንክ'} ማሳወቂያ` : `${item.bank || 'Bank'} Alert`;
+    }
+
     if (item.type === 'received') {
       if (cp) return `From ${cp}`;
       if (tail) return `Unknown sender (${tail})`;
@@ -352,6 +379,8 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
   const getCategoryLabel = (category?: PaymentCategory | string): string => {
     switch (category) {
+      case 'alert':
+        return isAm ? 'ማሳወቂያ' : 'Bank Alert';
       case 'airtime':
         return isAm ? 'አየር ሰዓት' : 'Airtime';
       case 'data':
@@ -591,31 +620,48 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         )}
 
         {/* Quick Category Filter Chips */}
-        <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 no-scrollbar">
-          {[
-            { id: 'all', label: isAm ? 'ሁሉም ዓይነቶች' : 'All Types' },
-            { id: 'transfer', label: isAm ? 'ዝውውር' : 'Transfers' },
-            { id: 'airtime', label: isAm ? 'አየር ሰዓት' : 'Airtime' },
-            { id: 'data', label: isAm ? 'ዳታ' : 'Data' },
-            { id: 'atm-card', label: isAm ? 'ATM/ካርድ' : 'ATM/Card' },
-            { id: 'bill', label: isAm ? 'ቢል' : 'Bills' },
-          ].map(cat => (
+        <div className="flex items-center justify-between gap-1.5 py-0.5">
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1 min-w-0">
+            {[
+              { id: 'all', label: isAm ? 'ሁሉም ዓይነቶች' : 'All Types' },
+              { id: 'transfer', label: isAm ? 'ዝውውር' : 'Transfers' },
+              { id: 'airtime', label: isAm ? 'አየር ሰዓት' : 'Airtime' },
+              { id: 'data', label: isAm ? 'ዳታ' : 'Data' },
+              { id: 'atm-card', label: isAm ? 'ATM/ካርድ' : 'ATM/Card' },
+              { id: 'bill', label: isAm ? 'ቢል' : 'Bills' },
+              { id: 'alert', label: isAm ? `ማሳወቂያ (${alertCount})` : `Alerts ${alertCount > 0 ? `(${alertCount})` : ''}` },
+            ].map(cat => (
+              <button
+                key={cat.id}
+                onClick={() => {
+                  triggerHaptic();
+                  setSelectedCategory(cat.id);
+                  setVisibleCount(50);
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-all ${
+                  selectedCategory === cat.id
+                    ? 'bg-slate-800 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+
+          {alertCount > 0 && selectedCategory === 'all' && (
             <button
-              key={cat.id}
+              type="button"
               onClick={() => {
                 triggerHaptic();
-                setSelectedCategory(cat.id);
-                setVisibleCount(50);
+                setHideAlerts(v => !v);
               }}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 transition-all ${
-                selectedCategory === cat.id
-                  ? 'bg-slate-800 text-white shadow-2xs'
-                  : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-              }`}
+              className="text-[10px] font-bold text-slate-500 hover:text-slate-800 shrink-0 px-2 py-1 rounded-lg border border-slate-200 bg-white shadow-2xs"
+              title="Toggle non-transaction alerts"
             >
-              {cat.label}
+              {hideAlerts ? 'Show Alerts' : 'Hide Alerts'}
             </button>
-          ))}
+          )}
         </div>
       </div>
 
@@ -651,6 +697,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
           const brand: BankBrand = getBankBrand(item.bank);
           const isReceived = item.type === 'received';
           const isSent = item.type === 'sent';
+          const isAlert = item.category === 'alert' || item.amount === 0 || item.serverResult?.status === 'Ignored';
           const rowTitle = getRowTitle(item);
           const hasV2 = Boolean(item.v2Code);
           const v2Link = item.v2Code ? `https://mbreciept.cbe.com.et/${item.v2Code}` : null;
@@ -719,25 +766,33 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
                   {/* Chips Row: Direction Chip + Separate Category Chip + Tag / Tag Suggestion */}
                   <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                    {/* Direction Chip */}
-                    {isReceived && (
-                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 px-1.5 py-0.2 rounded-md">
-                        Received ↙
+                    {/* Direction / Alert Chip */}
+                    {isAlert ? (
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-amber-50 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded-md">
+                        Alert ℹ️
                       </span>
-                    )}
-                    {isSent && (
-                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-rose-100 text-rose-900 border border-rose-300 px-1.5 py-0.2 rounded-md">
-                        Sent ↗
-                      </span>
-                    )}
-                    {!isReceived && !isSent && (
-                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-md">
-                        Unknown ?
-                      </span>
+                    ) : (
+                      <>
+                        {isReceived && (
+                          <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 px-1.5 py-0.2 rounded-md">
+                            Received ↙
+                          </span>
+                        )}
+                        {isSent && (
+                          <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-rose-100 text-rose-900 border border-rose-300 px-1.5 py-0.2 rounded-md">
+                            Sent ↗
+                          </span>
+                        )}
+                        {!isReceived && !isSent && (
+                          <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-md">
+                            Unknown ?
+                          </span>
+                        )}
+                      </>
                     )}
 
                     {/* Separate Category Chip */}
-                    {item.category && item.category !== 'received' && (
+                    {item.category && item.category !== 'received' && item.category !== 'alert' && !isAlert && (
                       <span className="inline-flex items-center text-[9px] font-semibold bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-md">
                         {getCategoryLabel(item.category)}
                       </span>
@@ -778,13 +833,19 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
               {/* Right Column: Amount + Status Badge */}
               <div className="text-right shrink-0 flex flex-col items-end gap-1">
-                {/* Amount */}
-                <div className="text-sm font-black font-['Poppins',sans-serif] tracking-tight">
-                  <span className={isReceived ? 'text-emerald-700' : isSent ? 'text-rose-700' : 'text-slate-800'}>
-                    {formatAmountCompact(item.amount, item.type)}
+                {/* Amount / Notice Badge */}
+                {isAlert ? (
+                  <span className="text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                    Bank Notice
                   </span>
-                  <span className="text-[10px] text-slate-400 ml-0.5 font-normal">ETB</span>
-                </div>
+                ) : (
+                  <div className="text-sm font-black font-['Poppins',sans-serif] tracking-tight">
+                    <span className={isReceived ? 'text-emerald-700' : isSent ? 'text-rose-700' : 'text-slate-800'}>
+                      {formatAmountCompact(item.amount, item.type)}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-0.5 font-normal">ETB</span>
+                  </div>
+                )}
 
                 {/* Server Sync / Result Badge */}
                 {getSyncStatusBadge(item)}
@@ -890,17 +951,34 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
             {/* Main Info Card */}
             <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="text-[10px] uppercase font-bold text-slate-400">Amount</div>
-                  <div className={`text-2xl font-black font-['Poppins',sans-serif] ${
-                    selectedPayment.type === 'received' ? 'text-emerald-700' : 'text-rose-700'
-                  }`}>
-                    {selectedPayment.type === 'received' ? '+' : '-'}{selectedPayment.amount.toFixed(2)} ETB
+              {selectedPayment.category === 'alert' ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] uppercase font-bold text-slate-400">Message Type</span>
+                      <div className="text-lg font-bold text-slate-800 font-['Poppins',sans-serif]">
+                        {selectedPayment.bank} Service Alert
+                      </div>
+                    </div>
+                    {getSyncStatusBadge(selectedPayment)}
+                  </div>
+                  <div className="bg-amber-50/80 border border-amber-200/90 rounded-xl p-2.5 text-[11px] text-amber-900 leading-snug">
+                    <b>Informational Alert:</b> This SMS is a bank login notification or security notice. It contains no financial debit or credit and is excluded from your totals and reports.
                   </div>
                 </div>
-                {getSyncStatusBadge(selectedPayment)}
-              </div>
+              ) : (
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="text-[10px] uppercase font-bold text-slate-400">Amount</div>
+                    <div className={`text-2xl font-black font-['Poppins',sans-serif] ${
+                      selectedPayment.type === 'received' ? 'text-emerald-700' : 'text-rose-700'
+                    }`}>
+                      {selectedPayment.type === 'received' ? '+' : '-'}{selectedPayment.amount.toFixed(2)} ETB
+                    </div>
+                  </div>
+                  {getSyncStatusBadge(selectedPayment)}
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-slate-200">
                 <div>

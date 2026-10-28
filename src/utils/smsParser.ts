@@ -126,6 +126,15 @@ export const CBE_OUTGOING_PHRASES: readonly string[] = [
   'has been debited',
   'a debit transaction',
   'debited with',
+  'debited from',
+  'debited for',
+  'debited',
+  'transferred to',
+  'sent to',
+  'paid to',
+  'ወጪ',
+  'ተላልፏል',
+  'አስተላልፈዋል',
 ];
 
 export const CBE_INCOMING_PHRASES: readonly string[] = [
@@ -133,6 +142,17 @@ export const CBE_INCOMING_PHRASES: readonly string[] = [
   'has been credited',
   'a credit transaction',
   'credited with',
+  'credited to',
+  'credited by',
+  'credited',
+  'deposited to',
+  'deposited by',
+  'deposited',
+  'received from',
+  'ገቢ',
+  'ተላልፎልዎታል',
+  'ተላልፎልዎታ',
+  'ገቢ ሆኗል',
 ];
 
 export const TELEBIRR_OUTGOING_PHRASES: readonly string[] = [
@@ -140,12 +160,14 @@ export const TELEBIRR_OUTGOING_PHRASES: readonly string[] = [
   'ልከዋል',
   'አስተላልፈዋል',
   'ገዝተዋል',
+  'ወጪ',
   'you have transferred',
   'you have paid',
 ];
 
 export const TELEBIRR_INCOMING_PHRASES: readonly string[] = [
   'ተቀብለዋል',
+  'ገቢ',
   'you have received',
   'has been credited',
 ];
@@ -251,6 +273,10 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
   const isAirtime = /አየር\s*ሰዓት|የአየር\s*ሰዓት|airtime|recharge|top\s*up/i.test(cleanMsg);
   const isData = /ኢንተርኔት|ዳታ|ጥቅል|package|bundle|internet/i.test(cleanMsg);
   const isPayment = /ከፍለዋል|\bpaid\b|\bmerchant\b|ለነጋዴ/i.test(cleanMsg);
+  const isAlertMsg =
+    /logged\s*in|login|log\s*in|otp|one\s*time\s*password|verification\s*code|security\s*alert|password\s*(?:changed|reset)|daily\s*limit|limit\s*has\s*been|statement\s*request|session\s*expired|announcement|fraud\s*alert|alert\s*:|notice\s*:/i.test(cleanMsg) ||
+    /የይለፍ\s*ቃል|ማረጋገጫ\s*ኮድ|ማስጠንቀቂያ|የደህንነት|የመግቢያ/i.test(cleanMsg);
+
   const isCbeAtmCard =
     bank === 'CBE' &&
     /debited\s*with/i.test(cleanMsg) &&
@@ -328,6 +354,12 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
+  // If amount is 0 and it's an alert or has no financial debit/credit words, mark as 'alert'
+  if (amount === 0 && (isAlertMsg || (type === 'unknown' && !actionAmountMatch))) {
+    category = 'alert';
+    type = 'unknown';
+  }
+
   const amountCents = Math.round(amount * 100);
   const amountSantim = amountCents;
 
@@ -347,19 +379,101 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
   const balanceSantim = balance !== undefined ? Math.round(balance * 100) : undefined;
 
   // 5. EXTRACT COUNTERPARTY NAME
-  // CBE rule: first parenthesis that has letters and no "%"
+  // CBE rule: first parenthesis that has letters and no "%", OR "by <Name> with txn id", OR "from <Name>"
   // Telebirr received: text between "ከ" and "("
   // Telebirr sent/paid: the word after "ለ"
   let counterparty = '';
 
   if (bank === 'CBE') {
+    // Rule A: Parentheses check (first parenthesis with letters, no %, not system tokens)
     const matches = cleanMsg.matchAll(/\(([^)]+)\)/g);
     for (const m of matches) {
       const inside = m[1].trim();
-      // Must contain letters, no %, and not just digits or asterisks
-      if (/[A-Za-z\u1200-\u137F]/.test(inside) && !inside.includes('%') && !/^[0-9+*#\s-]+$/.test(inside)) {
+      if (
+        /[A-Za-z\u1200-\u137F]/.test(inside) &&
+        !inside.includes('%') &&
+        !/^[0-9+*#\s-]+$/.test(inside) &&
+        !/^(?:vat|service\s*charge|cbe|ft|cbs|shorturl|http|charge)/i.test(inside)
+      ) {
         counterparty = inside;
         break;
+      }
+    }
+
+    // Rule B1: Amharic "በ <NAME> በኩል" (very common in CBE Amharic messages)
+    if (!counterparty) {
+      const amharicBekulMatch = cleanMsg.match(/በ\s+([A-Za-z\u1200-\u137F\s]{2,40}?)\s+በኩል/);
+      if (amharicBekulMatch && amharicBekulMatch[1]) {
+        const cand = amharicBekulMatch[1].trim();
+        if (!cand.includes('%') && !/^[0-9+*#\s\/-]+$/.test(cand) && cand.length >= 2) {
+          counterparty = cand;
+        }
+      }
+    }
+
+    // Rule B2: "by <NAME> [with/on/ref/txn/ft/.]"
+    // Handles: "by MERON TESHOME with txn id FT...", "by MERON TESHOME Ref: FT...", "by MERON TESHOME. Ref..."
+    if (!counterparty) {
+      const byMatch = cleanMsg.match(/\bby\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with\s+)?(?:txn|tx|ref|id|ft|ft\d|\/branchreceipt)|\s+on\s+\d|\.|$|,|;|(?:\s+(?:available|current|your|balance|ቀሪ)))/i);
+      if (byMatch && byMatch[1]) {
+        const cand = byMatch[1].trim();
+        if (
+          !cand.includes('%') &&
+          !/^(?:account|cbe|boa|etb|service|vat|bank|customer|branch|the)/i.test(cand) &&
+          !/^[0-9+*#\s-]+$/.test(cand) &&
+          cand.length >= 2
+        ) {
+          counterparty = cand;
+        }
+      }
+    }
+
+    // Rule C: "deposited by <NAME>" or "credited by <NAME>" or "received from <NAME>"
+    if (!counterparty) {
+      const depMatch = cleanMsg.match(/(?:deposited\s+by|credited\s+by|received\s+from)\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft)|\.|$|,|;)/i);
+      if (depMatch && depMatch[1]) {
+        const cand = depMatch[1].trim();
+        if (!cand.includes('%') && cand.length >= 2) {
+          counterparty = cand;
+        }
+      }
+    }
+
+    // Rule D: Explicit Key-Value labels (Sender: <NAME>, Payer: <NAME>, Depositor: <NAME>, ላኪ: <NAME>)
+    if (!counterparty) {
+      const labelMatch = cleanMsg.match(/(?:sender|payer|depositor|from\s*[:፡\-]|ላኪ|የላኪ\s*ስም)\s*[:፡\-]?\s*([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft|account|a\/c)|\.|$|,|;|\n)/i);
+      if (labelMatch && labelMatch[1]) {
+        const cand = labelMatch[1].trim();
+        if (
+          !cand.includes('%') && 
+          !/^(?:your|my|our|account|cbe|customer|dear|service)/i.test(cand) && 
+          !/^[0-9+*#\s-]+$/.test(cand) && 
+          cand.length >= 2
+        ) {
+          counterparty = cand;
+        }
+      }
+    }
+
+    // Rule E: "transfer to <NAME>", "transferred to <NAME>", "for transfer to <NAME>", "sent to <NAME>" for sent
+    if (!counterparty && type === 'sent') {
+      const toMatch = cleanMsg.match(/(?:(?:for\s+)?transfer(?:red)?\s+to|sent\s+to|debited\s+for(?:\s+transfer\s+to)?|paid\s+to|ተቀባይ|የተቀባይ\s*ስም|ለ)\s*(?:account\s+[0-9*]+\s+)?[:፡\-]?\s*([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft|\/branchreceipt)|\.|$|,|;|\(|\n)/i);
+      if (toMatch && toMatch[1]) {
+        const cand = toMatch[1].trim();
+        if (!cand.includes('%') && !/^(?:account|cbe|boa|etb|service|vat|bank|your)/i.test(cand) && cand.length >= 2) {
+          counterparty = cand;
+        }
+      }
+    }
+
+    // Rule F: "from account ... (Name) to your account" (Only for received payments)
+    if (!counterparty && type === 'received') {
+      const fromAcctMatch = cleanMsg.match(/from\s+(?:account\s+[0-9*]+\s+)?\(?([A-Za-z\u1200-\u137F\s]{2,40}?)\)?\s+to\s+(?:your\s+account|account)/i);
+      if (fromAcctMatch && fromAcctMatch[1]) {
+        const cand = fromAcctMatch[1].trim();
+        if (!cand.includes('%') && !/^(?:your|my|our|account|cbe)/i.test(cand) && !/^[0-9*]+$/.test(cand) && cand.length >= 2) {
+          counterparty = cand;
+        }
       }
     }
   } else if (bank === 'Telebirr') {
@@ -388,8 +502,19 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
-  // General fallback for names if not yet found
-  if (!counterparty) {
+  // General fallback for names across all banks if not yet found
+  if (!counterparty && category !== 'alert') {
+    // Check "by <Name> with txn id / on"
+    const byMatch = cleanMsg.match(/\b(?:by|በ)\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+with\s+(?:txn|tx|ref|id)|(?:\s+on\s+\d)|\.|$|,)/i);
+    if (byMatch && byMatch[1]) {
+      const candidate = byMatch[1].trim();
+      if (!candidate.includes('%') && !/^(?:account|service|vat|bank|customer)/i.test(candidate) && !/^[0-9+*#\s-]+$/.test(candidate)) {
+        counterparty = candidate;
+      }
+    }
+  }
+
+  if (!counterparty && category !== 'alert') {
     if (type === 'received') {
       const fromMatch = cleanMsg.match(/(?:from|ከ)\s+([A-Za-z\u1200-\u137F\s]+?)(?:\s*\(|\s+to\s+|\s+for|\.|$)/i);
       if (fromMatch && fromMatch[1]?.trim()) {
@@ -409,17 +534,36 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
+  // If this is an alert message and counterparty is empty, set friendly alert title
+  if (category === 'alert' && !counterparty) {
+    counterparty = bank === 'BOA' ? 'BOA Service Alert' : bank ? `${bank} Alert` : 'Bank Notification';
+  }
+
   // Clean up counterparty
   counterparty = counterparty
-    .replace(/^(the|dear|customer|ለ|ከ)\s+/i, '')
+    .replace(/^(the|dear|customer|ለ|ከ|by|በ)\s+/i, '')
     .replace(/[\r\n።፤]+/g, ' ')
     .trim();
 
   // 6. EXTRACT ACCOUNT NUMBER
   let accountNumber: string | undefined = undefined;
-  const accMatch = cleanMsg.match(/(?:account|acc\.?|a\/c|ሂሳብ\s*ቁጥር)\s*(?:no\.?|number)?\s*:?\s*([0-9*]{4,20})/i);
-  if (accMatch && accMatch[1]) {
-    accountNumber = accMatch[1];
+  if (type === 'received') {
+    const fromAcc = cleanMsg.match(/from\s+account\s+([0-9*]{4,20})/i);
+    if (fromAcc && fromAcc[1]) {
+      accountNumber = fromAcc[1];
+    }
+  } else if (type === 'sent') {
+    const toAcc = cleanMsg.match(/to\s+account\s+([0-9*]{4,20})/i);
+    if (toAcc && toAcc[1]) {
+      accountNumber = toAcc[1];
+    }
+  }
+
+  if (!accountNumber) {
+    const accMatch = cleanMsg.match(/(?:account|acc\.?|a\/c|ሂሳብ\s*ቁጥር)\s*(?:no\.?|number)?\s*:?\s*([0-9*]{4,20})/i);
+    if (accMatch && accMatch[1]) {
+      accountNumber = accMatch[1];
+    }
   }
 
   // 7. EXTRACT DATE / TIME

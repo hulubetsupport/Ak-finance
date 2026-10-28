@@ -11,6 +11,7 @@ export type PaymentCategory =
   | 'bill' 
   | 'cash' 
   | 'atm-card' 
+  | 'alert'
   | 'other';
 
 export interface ServerResultRecord {

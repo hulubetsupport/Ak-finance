@@ -287,11 +287,12 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
               <p className="text-[11px] text-slate-500">
                 Schema Version: {pendingRestore.version} · Secret Key in backup: {pendingRestore.hasSecretKey ? 'Yes' : 'No'}
               </p>
-              <div className="text-[10px] text-emerald-800 font-medium pt-1 flex items-center gap-1">
-                <span>🛡️ Zero data loss: Auto-snapshot saved before restore.</span>
+              <div className="text-[10px] text-emerald-800 font-semibold pt-1 flex items-center gap-1.5 bg-emerald-50/90 p-2 rounded-xl border border-emerald-200">
+                <FileCheck size={14} className="text-emerald-700 shrink-0" />
+                <span>Safe Additive Update: New records are added without deleting any existing payments or bank accounts.</span>
               </div>
-              <p className="text-[11px] text-amber-800 font-medium pt-1">
-                Choose how to apply this backup:
+              <p className="text-[11px] text-slate-700 font-medium pt-1">
+                Choose installation method:
               </p>
             </div>
 
@@ -301,22 +302,23 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                   type="button"
                   disabled={loading}
                   onClick={() => handleExecuteRestore('merge')}
-                  className="flex-1 py-2 px-3 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-xs hover:bg-[#0e3b2e] active:scale-98 transition-all"
+                  className="flex-2 py-2 px-3 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-xs hover:bg-[#0e3b2e] active:scale-98 transition-all flex items-center justify-center gap-1.5"
                 >
-                  Merge (Safe)
+                  <Check size={14} />
+                  <span>Install Update (Never Delete)</span>
                 </button>
                 <button
                   type="button"
                   disabled={loading}
                   onClick={() => setShowReplaceConfirm(true)}
-                  className="flex-1 py-2 px-3 rounded-xl border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-xs font-bold active:scale-98 transition-all"
+                  className="flex-1 py-2 px-2 rounded-xl border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-xs font-bold active:scale-98 transition-all"
                 >
                   Replace All...
                 </button>
                 <button
                   type="button"
                   onClick={() => setPendingRestore(null)}
-                  className="py-2 px-3 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
+                  className="py-2 px-2.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
                 >
                   Cancel
                 </button>
@@ -423,14 +425,19 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
           </button>
         </div>
 
-        {/* Action 2: Restore Backup */}
+        {/* Action 2: Install Update & Restore */}
         <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-2">
-          <div className="flex items-center gap-2">
-            <Upload size={16} className="text-[#14503F]" />
-            <span className="text-xs font-bold text-slate-900">Restore on Device</span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Upload size={16} className="text-[#14503F]" />
+              <span className="text-xs font-bold text-slate-900">Install Update & Merge Backup</span>
+            </div>
+            <span className="text-[9.5px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+              No Data Loss
+            </span>
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            Select an `ak_finance_backup_*.json` file. You can choose to merge non-duplicate records or replace completely.
+            Select an `ak_finance_backup_*.json` file. All new transactions, accounts, and budgets are installed safely without deleting your existing database.
           </p>
           <input
             type="file"
@@ -445,8 +452,8 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
             onClick={() => fileInputRef.current?.click()}
             className="w-full py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold shadow-xs active:scale-98 transition-all flex items-center justify-center gap-1.5"
           >
-            <Upload size={13} />
-            <span>Select & Inspect Backup File</span>
+            <Upload size={13} className="text-[#14503F]" />
+            <span>Select Backup File to Install / Update</span>
           </button>
         </div>
 

@@ -1,4 +1,4 @@
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry, SyncStatus, ServerResultRecord } from '../types/index.ts';
+import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry, SyncStatus, ServerResultRecord, MonthlyBudget } from '../types/index.ts';
 import { parseBankSms, DEFAULT_SENDER_BANK_MAP } from '../utils/smsParser.ts';
 import { 
   getNativeSettings, 
@@ -28,6 +28,7 @@ const LOCAL_STORAGE_KEYS = {
   WITHDRAWALS: 'ak_withdrawals_v2',
   LOGS: 'ak_sync_logs_v2',
   UI_PREFS: 'ak_ui_prefs_v2',
+  BUDGETS: 'ak_monthly_budgets_v2',
 };
 
 export const DEFAULT_BANK_ACCOUNTS: Omit<Account, 'balance' | 'receivedThisMonth' | 'sentThisMonth' | 'hasSyncedBalance'>[] = [
@@ -190,7 +191,7 @@ class DatabaseService {
 
   public async saveSmsOverride(
     smsId: string,
-    override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean }
+    override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean; reference?: string }
   ): Promise<void> {
     await saveNativeSmsOverride(
       Number(smsId),
@@ -198,7 +199,8 @@ class DatabaseService {
       override.direction ?? null,
       override.note || '',
       !!override.isHidden,
-      override.tag || ''
+      override.tag || '',
+      override.reference || ''
     );
     // If tag is set and counterparty is non-empty, remember it
     if (override.tag && override.counterparty) {
@@ -270,6 +272,12 @@ class DatabaseService {
         if (serverResultObj.v2 && !v2Code) {
           v2Code = serverResultObj.v2;
         }
+      }
+
+      // Check if reference/FT was manually or auto overridden
+      if (ov?.reference) {
+        ftNumber = ov.reference;
+        reference = ov.reference;
       }
 
       const isHidden = ov ? !!ov.isHidden : false;
@@ -696,6 +704,47 @@ class DatabaseService {
     return newRecord;
   }
 
+  // Monthly Budget Management (2026)
+  public async getMonthlyBudgets(): Promise<MonthlyBudget[]> {
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.BUDGETS);
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return [];
+  }
+
+  public async getMonthlyBudget(monthStr?: string): Promise<MonthlyBudget> {
+    const targetMonth = monthStr || new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+    const budgets = await this.getMonthlyBudgets();
+    const existing = budgets.find(b => b.month === targetMonth);
+    if (existing) return existing;
+
+    // Default starting monthly budget: 50,000 ETB
+    const defaultBudget: MonthlyBudget = {
+      id: `budget-${targetMonth}`,
+      month: targetMonth,
+      overallLimit: 50000,
+      categoryLimits: {
+        'Transfer': 25000,
+        'Supplies': 12000,
+        'Rent': 8000,
+        'Airtime': 3000,
+        'Personal': 2000,
+      },
+      updatedAt: Date.now(),
+    };
+    return defaultBudget;
+  }
+
+  public async saveMonthlyBudget(budget: MonthlyBudget): Promise<void> {
+    const list = await this.getMonthlyBudgets();
+    const filtered = list.filter(b => b.month !== budget.month);
+    filtered.push({ ...budget, updatedAt: Date.now() });
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.BUDGETS, JSON.stringify(filtered));
+    } catch {}
+  }
+
   public async getSyncLogs(): Promise<SyncLogEntry[]> {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.LOGS);
@@ -845,6 +894,7 @@ class DatabaseService {
       counterpartyTags,
       customAccounts,
       withdrawals,
+      budgets: await this.getMonthlyBudgets(),
     };
 
     return JSON.stringify(backup, null, 2);
@@ -1009,7 +1059,24 @@ class DatabaseService {
         } catch {}
       }
 
-      // 7. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates)
+      // 7. Monthly Budgets (2026): safely merged without deleting existing budgets
+      if (Array.isArray(data.budgets)) {
+        try {
+          const currentBudgets = await this.getMonthlyBudgets();
+          const budgetMap = new Map<string, MonthlyBudget>();
+          for (const b of currentBudgets) budgetMap.set(b.month, b);
+          for (const b of data.budgets) {
+            if (b && b.month && typeof b.overallLimit === 'number') {
+              if (mode === 'replace' || !budgetMap.has(b.month)) {
+                budgetMap.set(b.month, b);
+              }
+            }
+          }
+          localStorage.setItem(LOCAL_STORAGE_KEYS.BUDGETS, JSON.stringify(Array.from(budgetMap.values())));
+        } catch {}
+      }
+
+      // 8. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates)
       const msgSource: Array<{ sender: string; body: string }> = 
         (Array.isArray(data.messages) && data.messages.length > 0)
           ? data.messages

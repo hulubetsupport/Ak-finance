@@ -94,6 +94,14 @@ export interface SecuritySettings {
   lockoutUntil: number;
 }
 
+export interface MonthlyBudget {
+  id: string;
+  month: string; // 'YYYY-MM'
+  overallLimit: number;
+  categoryLimits?: Record<string, number>;
+  updatedAt: number;
+}
+
 export interface BackupData {
   version: number;
   exportedAt: string;
@@ -104,6 +112,9 @@ export interface BackupData {
   senderBankMap: Record<string, string>;
   counterpartyTags: Record<string, string>;
   settings: AppSettings;
+  budgets?: MonthlyBudget[];
+  customAccounts?: Account[];
+  withdrawals?: WithdrawalRecord[];
 }
 
 export interface Account {

@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from './services/db.ts';
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings, TimeRange } from './types/index.ts';
+import { PaymentRecord, Account, WithdrawalRecord, AppSettings, TimeRange, MonthlyBudget } from './types/index.ts';
 import { filterPaymentsByTimeRange } from './utils/timeRange.ts';
 import { translations } from './utils/i18n.ts';
 import { Header } from './components/Header.tsx';
@@ -43,6 +43,7 @@ export default function App() {
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRecord[]>([]);
+  const [monthlyBudget, setMonthlyBudget] = useState<MonthlyBudget | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [nativeStatus, setNativeStatus] = useState<NativeStatus>({
     smsGranted: false,
@@ -122,12 +123,14 @@ export default function App() {
       setNativeStatus(stat);
       setHiddenBankIds(db.getHiddenBankIds());
 
-      const [a, w] = await Promise.all([
+      const [a, w, b] = await Promise.all([
         db.getAccounts(),
         db.getAllWithdrawals(),
+        db.getMonthlyBudget(),
       ]);
       setAccounts(a);
       setWithdrawals(w);
+      setMonthlyBudget(b);
     } catch (e) {
       console.error('Failed loading data from native layer:', e);
     }
@@ -319,6 +322,11 @@ export default function App() {
     setAccounts(newAccs);
   };
 
+  const handleUpdateBudget = async (b: MonthlyBudget) => {
+    await db.saveMonthlyBudget(b);
+    setMonthlyBudget(b);
+  };
+
   const handlePrevMonth = () => {
     setCurrentMonthIndex(prev => (prev > 0 ? prev - 1 : months.length - 1));
   };
@@ -465,6 +473,8 @@ export default function App() {
             payments={payments}
             withdrawals={withdrawals}
             settings={settings}
+            budget={monthlyBudget}
+            onUpdateBudget={handleUpdateBudget}
           />
         )}
 
@@ -483,6 +493,10 @@ export default function App() {
             accounts={accounts}
             settings={settings}
             onUpdateAccounts={handleUpdateAccounts}
+            budget={monthlyBudget}
+            onUpdateBudget={handleUpdateBudget}
+            payments={payments}
+            withdrawals={withdrawals}
           />
         )}
 

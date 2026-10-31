@@ -43,11 +43,14 @@ export const EjetaAiTab: React.FC<EjetaAiTabProps> = ({
   const [calcDisplay, setCalcDisplay] = useState('0');
   const [calcFormula, setCalcFormula] = useState('');
 
-  // 7 Required Shortcut Chips
+  // Shortcut Chips (including 2026 intelligence shortcuts)
   const SHORTCUT_CHIPS = [
     { id: 'cbe-month', label: 'Total CBE income this month' },
     { id: 'telebirr-month', label: 'Total Telebirr received/sent this month' },
     { id: 'today-total', label: "Today's total" },
+    { id: 'top-counterparty', label: 'Top counterparty by volume' },
+    { id: 'avg-ticket', label: 'Average transaction size' },
+    { id: 'projected-runrate', label: '2026 monthly run-rate' },
     { id: 'biggest-payment', label: 'Biggest payment this month' },
     { id: 'bank-summary', label: 'Per-bank summary' },
     { id: 'unsent-failed', label: 'Unsent/failed payments' },
@@ -208,6 +211,83 @@ export const EjetaAiTab: React.FC<EjetaAiTabProps> = ({
             value: `${p.amount.toLocaleString()} ETB (${p.syncStatus})`,
             color: 'text-amber-700',
           })),
+          timestamp: Date.now(),
+        };
+      }
+
+      case 'top-counterparty': {
+        const counterpartiesMap: Record<string, { total: number; count: number; bank: string; type: string }> = {};
+        for (const p of validPayments) {
+          if (p.category === 'alert' || !p.counterparty || p.counterparty.toLowerCase().includes('unknown')) continue;
+          const name = p.counterparty.trim();
+          if (!counterpartiesMap[name]) counterpartiesMap[name] = { total: 0, count: 0, bank: p.bank, type: p.type };
+          counterpartiesMap[name].total += p.amount;
+          counterpartiesMap[name].count += 1;
+        }
+        const sorted = Object.entries(counterpartiesMap).sort((a, b) => b[1].total - a[1].total);
+        const top = sorted[0];
+        if (!top) {
+          return {
+            id: createCardId('top-counterparty'),
+            query: 'Top counterparty by volume',
+            title: 'Top Counterparty',
+            mainFigure: 'None Identified',
+            subtext: 'No named counterparties extracted from messages yet.',
+            timestamp: Date.now(),
+          };
+        }
+        return {
+          id: createCardId('top-counterparty'),
+          query: 'Top counterparty by volume',
+          title: `Leader: ${top[0]}`,
+          mainFigure: `ETB ${top[1].total.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+          subtext: `${top[1].count} transactions across ${top[1].bank}`,
+          details: sorted.slice(1, 4).map(([name, stat]) => ({
+            label: name,
+            value: `${stat.total.toLocaleString()} ETB (${stat.count} txns)`,
+            color: 'text-emerald-700',
+          })),
+          timestamp: Date.now(),
+        };
+      }
+
+      case 'avg-ticket': {
+        const valid = validPayments.filter(p => p.category !== 'alert');
+        const total = valid.reduce((acc, p) => acc + p.amount, 0);
+        const avg = valid.length > 0 ? total / valid.length : 0;
+        const rec = valid.filter(p => p.type === 'received');
+        const avgIn = rec.length > 0 ? rec.reduce((acc, p) => acc + p.amount, 0) / rec.length : 0;
+        const sent = valid.filter(p => p.type === 'sent');
+        const avgOut = sent.length > 0 ? sent.reduce((acc, p) => acc + p.amount, 0) / sent.length : 0;
+        return {
+          id: createCardId('avg-ticket'),
+          query: 'Average transaction size',
+          title: 'Ticket Size Intelligence (2026)',
+          mainFigure: `ETB ${avg.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+          subtext: `Computed across ${valid.length} non-alert transactions`,
+          details: [
+            { label: 'Avg Received Ticket', value: `+${avgIn.toFixed(2)} ETB (${rec.length} txns)`, color: 'text-emerald-700' },
+            { label: 'Avg Sent Ticket', value: `-${avgOut.toFixed(2)} ETB (${sent.length} txns)`, color: 'text-rose-700' },
+          ],
+          timestamp: Date.now(),
+        };
+      }
+
+      case 'projected-runrate': {
+        const receivedTotal = validPayments.filter(p => p.type === 'received').reduce((acc, p) => acc + p.amount, 0);
+        const dayOfMonth = Math.max(1, new Date().getDate());
+        const daysInMonth = 30;
+        const projected = (receivedTotal / dayOfMonth) * daysInMonth;
+        return {
+          id: createCardId('projected-runrate'),
+          query: '2026 monthly run-rate',
+          title: 'Projected Monthly Inflow Run-Rate',
+          mainFigure: `ETB ${projected.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+          subtext: `Based on current pace of ETB ${(receivedTotal / dayOfMonth).toFixed(2)}/day (day ${dayOfMonth} of ${daysInMonth})`,
+          details: [
+            { label: 'Actual Month-to-Date Inflow', value: `${receivedTotal.toLocaleString()} ETB`, color: 'text-emerald-700' },
+            { label: 'Daily Average Velocity', value: `${(receivedTotal / dayOfMonth).toFixed(2)} ETB/day` },
+          ],
           timestamp: Date.now(),
         };
       }

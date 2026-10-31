@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Account, AppSettings } from '../types/index.ts';
+import { Account, AppSettings, MonthlyBudget, PaymentRecord, WithdrawalRecord } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
 import { 
   Building2, 
@@ -21,17 +21,26 @@ import {
 } from 'lucide-react';
 import { BANK_PRESETS, getBankBrand } from '../constants/bankBrands.ts';
 import { db } from '../services/db.ts';
+import { MonthlyBudgetCard } from './MonthlyBudgetCard.tsx';
 
 interface OrganizeTabProps {
   accounts: Account[];
   settings: AppSettings;
   onUpdateAccounts: (accounts: Account[]) => Promise<void>;
+  budget?: MonthlyBudget | null;
+  onUpdateBudget?: (budget: MonthlyBudget) => Promise<void>;
+  payments?: PaymentRecord[];
+  withdrawals?: WithdrawalRecord[];
 }
 
 export const OrganizeTab: React.FC<OrganizeTabProps> = ({
   accounts,
   settings,
   onUpdateAccounts,
+  budget,
+  onUpdateBudget,
+  payments,
+  withdrawals,
 }) => {
   const isAm = settings.language === 'am';
 
@@ -216,6 +225,17 @@ export const OrganizeTab: React.FC<OrganizeTabProps> = ({
           <span>{isAm ? 'ባንክ አክል' : '+ Add Bank'}</span>
         </button>
       </div>
+
+      {/* Monthly Budget Card (2026) */}
+      {budget && onUpdateBudget && payments && withdrawals && (
+        <MonthlyBudgetCard
+          payments={payments}
+          withdrawals={withdrawals}
+          budget={budget}
+          settings={settings}
+          onUpdateBudget={onUpdateBudget}
+        />
+      )}
 
       {/* Active Banks List */}
       <div className="space-y-2">

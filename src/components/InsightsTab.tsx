@@ -1,5 +1,5 @@
 import React from 'react';
-import { PaymentRecord, AppSettings, WithdrawalRecord } from '../types/index.ts';
+import { PaymentRecord, AppSettings, WithdrawalRecord, MonthlyBudget } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
 import { 
   BarChart3, 
@@ -12,17 +12,22 @@ import {
   Building2,
   PieChart
 } from 'lucide-react';
+import { MonthlyBudgetCard } from './MonthlyBudgetCard.tsx';
 
 interface InsightsTabProps {
   payments: PaymentRecord[];
   withdrawals: WithdrawalRecord[];
   settings: AppSettings;
+  budget?: MonthlyBudget | null;
+  onUpdateBudget?: (budget: MonthlyBudget) => Promise<void>;
 }
 
 export const InsightsTab: React.FC<InsightsTabProps> = ({
   payments,
   withdrawals,
   settings,
+  budget,
+  onUpdateBudget,
 }) => {
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
@@ -128,6 +133,17 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
         </div>
       </div>
 
+      {/* Monthly Budget Card (2026) */}
+      {budget && onUpdateBudget && (
+        <MonthlyBudgetCard
+          payments={payments}
+          withdrawals={withdrawals}
+          budget={budget}
+          settings={settings}
+          onUpdateBudget={onUpdateBudget}
+        />
+      )}
+
       {/* Queue Health Card */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3">
         <div className="flex items-center justify-between">
@@ -214,6 +230,107 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
             );
           })}
         </div>
+      </div>
+
+      {/* 2026 Top Counterparties Leaderboard */}
+      <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-emerald-50 text-[#14503F] flex items-center justify-center">
+              <TrendingUp size={16} />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+                {isAm ? 'ዋነኛ ደንበኞች እና ተቀባዮች' : 'Top Counterparties Leaderboard (2026)'}
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {isAm ? 'ከፍተኛ የገንዘብ እንቅስቃሴ ያላቸው' : 'Ranked by cumulative transaction volume'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {(() => {
+          const counterpartiesMap: Record<string, { total: number; count: number; type: 'received' | 'sent' }> = {};
+          payments.forEach(p => {
+            if (p.category === 'alert' || !p.counterparty || p.counterparty.toLowerCase().includes('unknown')) return;
+            const name = p.counterparty.trim();
+            if (!counterpartiesMap[name]) {
+              counterpartiesMap[name] = { total: 0, count: 0, type: p.type === 'received' ? 'received' : 'sent' };
+            }
+            counterpartiesMap[name].total += (p.amount || 0);
+            counterpartiesMap[name].count += 1;
+          });
+
+          const sortedCounterparties = Object.entries(counterpartiesMap)
+            .sort((a, b) => b[1].total - a[1].total)
+            .slice(0, 5);
+
+          if (sortedCounterparties.length === 0) {
+            return (
+              <div className="text-center py-4 text-xs text-slate-400">
+                No identified named counterparties yet
+              </div>
+            );
+          }
+
+          return (
+            <div className="space-y-2 pt-1">
+              {sortedCounterparties.map(([name, info], idx) => (
+                <div key={name} className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-100 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-700 text-[10px] font-bold flex items-center justify-center">
+                      #{idx + 1}
+                    </span>
+                    <div>
+                      <div className="font-bold text-slate-800 line-clamp-1">{name}</div>
+                      <div className="text-[10px] text-slate-400">
+                        {info.count} txn{info.count > 1 ? 's' : ''} • {info.type}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="font-black font-['Poppins',sans-serif] text-slate-900">
+                    {settings.hideBalances ? '••••' : `${info.total.toLocaleString()} ETB`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Ticket Size Distribution */}
+      <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3">
+        <div className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
+          {isAm ? 'የክፍያ መጠን ስርጭት' : 'Transaction Size Distribution'}
+        </div>
+        {(() => {
+          const validTx = payments.filter(p => p.category !== 'alert');
+          const micro = validTx.filter(p => p.amount < 500).length;
+          const medium = validTx.filter(p => p.amount >= 500 && p.amount <= 2000).length;
+          const large = validTx.filter(p => p.amount > 2000).length;
+          const total = validTx.length || 1;
+
+          return (
+            <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+                <div className="text-[10px] text-slate-400">&lt; 500 ETB</div>
+                <div className="font-bold text-slate-800 text-sm mt-0.5">{micro}</div>
+                <div className="text-[9px] text-slate-400">{Math.round((micro / total) * 100)}%</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+                <div className="text-[10px] text-slate-400">500 - 2,000 ETB</div>
+                <div className="font-bold text-slate-800 text-sm mt-0.5">{medium}</div>
+                <div className="text-[9px] text-slate-400">{Math.round((medium / total) * 100)}%</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100">
+                <div className="text-[10px] text-slate-400">&gt; 2,000 ETB</div>
+                <div className="font-bold text-slate-800 text-sm mt-0.5">{large}</div>
+                <div className="text-[9px] text-slate-400">{Math.round((large / total) * 100)}%</div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

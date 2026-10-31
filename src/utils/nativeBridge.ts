@@ -274,6 +274,7 @@ export interface SmsOverride {
   note: string;
   tag?: string;
   isHidden: boolean;
+  reference?: string;
 }
 
 export type SmsOverridesMap = Record<string, SmsOverride>;
@@ -336,22 +337,29 @@ export const saveNativeSmsOverride = async (
   direction: string | null,
   note: string,
   isHidden: boolean,
-  tag: string = ''
+  tag: string = '',
+  reference: string = ''
 ): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverrideWithTag) {
-    return !!(window as any).AndroidBridge.saveSmsOverrideWithTag(smsId, counterparty, direction, note, isHidden, tag);
+    try {
+      (window as any).AndroidBridge.saveSmsOverrideWithTag(smsId, counterparty, direction, note, isHidden, tag);
+    } catch {}
   } else if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverride) {
-    return !!(window as any).AndroidBridge.saveSmsOverride(smsId, counterparty, direction, note, isHidden);
+    try {
+      (window as any).AndroidBridge.saveSmsOverride(smsId, counterparty, direction, note, isHidden);
+    } catch {}
   }
 
   try {
     const current = await getNativeSmsOverrides();
     current[String(smsId)] = {
+      ...(current[String(smsId)] || {}),
       counterparty,
       direction: direction as any,
       note,
       tag: tag || '',
       isHidden,
+      reference: reference || current[String(smsId)]?.reference || undefined,
     };
     localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
     return true;

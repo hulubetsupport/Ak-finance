@@ -521,14 +521,14 @@ class DatabaseService {
 
       await saveNativeServerResult(msg.id, httpCode, replyStatus, ref, reason, rawBody);
 
-      if (data?.ok) {
+      if (data?.ok || replyStatus === 'Ignored') {
         await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null);
         return {
           ok: true,
           status: replyStatus,
           message:
             replyStatus === 'Ignored'
-              ? `Server replied Ignored (${reason || 'unsupported by server'}); local record preserved.`
+              ? `Server replied Ignored (${reason || 'unsupported by server'}); kept strictly in local DB and will not retry.`
               : `Synced to server (${replyStatus}${ref ? ` · ${ref}` : ''}).`,
         };
       } else {
@@ -549,7 +549,9 @@ class DatabaseService {
       return { synced: 0, ignored: 0, failed: 0, error: 'Server webhook URL is not configured in Settings.' };
     }
     const payments = await this.getAllPayments(true);
-    const unsynced = payments.filter(p => p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed');
+    const unsynced = payments.filter(
+      p => !p.serverIgnored && (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed')
+    );
     let synced = 0;
     let ignored = 0;
     let failed = 0;

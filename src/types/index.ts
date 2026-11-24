@@ -2,15 +2,15 @@ export type SyncStatus = 'sent' | 'pending' | 'failed' | 'local';
 
 export type PaymentType = 'received' | 'sent' | 'unknown';
 
-export type PaymentCategory = 
-  | 'received' 
-  | 'transfer' 
-  | 'airtime' 
-  | 'data' 
-  | 'payment' 
-  | 'bill' 
-  | 'cash' 
-  | 'atm-card' 
+export type PaymentCategory =
+  | 'received'
+  | 'transfer'
+  | 'airtime'
+  | 'data'
+  | 'payment'
+  | 'bill'
+  | 'cash'
+  | 'atm-card'
   | 'alert'
   | 'other';
 
@@ -29,19 +29,26 @@ export interface ServerResultRecord {
   amount?: number;
 }
 
-export type BankName = 
+export type BankName =
   | 'Telebirr'
   | 'CBE'
   | 'Commercial Bank of Ethiopia'
   | 'Awash Bank'
   | 'Dashen Bank'
   | 'Bank of Abyssinia'
-  | 'Abay Bank'
-  | 'Wegagen Bank'
-  | 'Nib Bank'
   | 'Zemen Bank'
+  | 'Siinqee Bank'
+  | 'eBirr'
+  | 'ZamZam Bank'
+  | 'CBE Birr'
+  | 'Bunna Bank'
+  | 'Wegagen Bank'
+  | 'M-Pesa'
+  | 'Abay Bank'
+  | 'Nib Bank'
   | 'Coop Bank'
   | 'Hibret Bank'
+  | 'Tsedey Bank'
   | string;
 
 export type TimeRange = '1h' | '1d' | '7d' | '1mo' | '1y' | 'all' | 'custom';
@@ -62,6 +69,7 @@ export interface PaymentRecord {
   reference: string;
   ftNumber?: string;
   v2Code?: string;
+  receiptUrl?: string;
   accountNumber?: string;
   balance?: number;
   balanceSantim?: number;
@@ -70,6 +78,8 @@ export interface PaymentRecord {
   timestamp: number;
   date: string;
   syncStatus: SyncStatus;
+  serverIgnored?: boolean;
+  serverIgnoredReason?: string;
   retryCount: number;
   lastRetryAt?: number;
   errorMessage?: string;
@@ -82,6 +92,7 @@ export interface PaymentRecord {
   suggestedTag?: string;
   isHidden?: boolean;
   isOverridden?: boolean;
+  aiParsed?: boolean;
 }
 
 export interface SecuritySettings {
@@ -107,6 +118,7 @@ export interface BackupData {
   exportedAt: string;
   app: string;
   messages: any[];
+  serverResults?: Record<string, any>;
   openingBalances: Record<string, number>;
   overrides: Record<string, any>;
   senderBankMap: Record<string, string>;
@@ -115,6 +127,10 @@ export interface BackupData {
   budgets?: MonthlyBudget[];
   customAccounts?: Account[];
   withdrawals?: WithdrawalRecord[];
+  hiddenBanks?: string[];
+  archivedAccounts?: string[];
+  accountOrder?: string[];
+  uiPrefs?: Record<string, any>;
 }
 
 export interface Account {
@@ -150,9 +166,12 @@ export interface WithdrawalRecord {
   reference: string;
 }
 
+import type { AiChatModelId } from '../constants/aiModels.ts';
+
 export type AppMode = 'server' | 'local';
 export type HttpMethod = 'POST' | 'GET';
 export type Language = 'en' | 'am';
+export type AiModelId = AiChatModelId;
 
 export interface AppSettings {
   serverUrl: string;
@@ -168,6 +187,9 @@ export interface AppSettings {
   excludeHiddenFromTotal?: boolean;
   startHiddenAfterUnlock?: boolean;
   timeRange?: TimeRange;
+  aiEnabled?: boolean;
+  aiAutoParseUnknown?: boolean;
+  aiModel?: AiModelId;
 }
 
 export interface SyncLogEntry {

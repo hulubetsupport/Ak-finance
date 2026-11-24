@@ -11,9 +11,7 @@ import { translations } from './utils/i18n.ts';
 import { Header } from './components/Header.tsx';
 import { AccountsCardStack } from './components/AccountsCardStack.tsx';
 import { NetMovementCard } from './components/NetMovementCard.tsx';
-import { QuickActions } from './components/QuickActions.tsx';
-import { SetupBanner } from './components/SetupBanner.tsx';
-import { PaymentsList } from './components/PaymentsList.tsx';
+import { PaymentsList, LedgerStatusFilter } from './components/PaymentsList.tsx';
 import { BottomNav, TabId } from './components/BottomNav.tsx';
 import { SmsSimulatorModal } from './components/SmsSimulatorModal.tsx';
 import { InsightsTab } from './components/InsightsTab.tsx';
@@ -22,7 +20,6 @@ import { EjetaAiTab } from './components/EjetaAiTab.tsx';
 import { OrganizeTab } from './components/OrganizeTab.tsx';
 import { SettingsTab } from './components/SettingsTab.tsx';
 import { SearchModal } from './components/SearchModal.tsx';
-import { AndroidPermissionModal } from './components/AndroidPermissionModal.tsx';
 import { SecurityLockScreen } from './components/SecurityLockScreen.tsx';
 import { SecuritySettingsModal } from './components/SecuritySettingsModal.tsx';
 import { BackupRestoreModal } from './components/BackupRestoreModal.tsx';
@@ -30,43 +27,48 @@ import { LocalVerifyModal } from './components/LocalVerifyModal.tsx';
 import { AboutModal } from './components/AboutModal.tsx';
 import { HeaderMenu } from './components/HeaderMenu.tsx';
 import { hasPinConfigured } from './utils/security.ts';
-import { MessageSquarePlus, RefreshCw } from 'lucide-react';
-import { 
-  getNativeStatus, 
-  retryNow, 
-  startKeepAliveService, 
-  NativeStatus 
-} from './utils/nativeBridge.ts';
+import {
+  LayoutGrid,
+  ReceiptText,
+  BarChart3,
+  Layers,
+  Sparkles,
+  MessageSquarePlus,
+  Database,
+  ShieldCheck,
+  Settings,
+  Lock,
+  Info,
+  AlertTriangle,
+  CloudUpload,
+  RefreshCw,
+} from 'lucide-react';
+import { retryNow, startKeepAliveService } from './utils/nativeBridge.ts';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabId>('home');
+  const [ledgerStatusFilter, setLedgerStatusFilter] = useState<LedgerStatusFilter>('all');
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRecord[]>([]);
   const [monthlyBudget, setMonthlyBudget] = useState<MonthlyBudget | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [nativeStatus, setNativeStatus] = useState<NativeStatus>({
-    smsGranted: false,
-    lastSmsAt: 0,
-    lastSmsSender: '',
-    lastCode: 0,
-    lastCodeAt: 0,
-    pending: 0,
-  });
 
   // Filter state
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [directionFilter, setDirectionFilter] = useState<'all' | 'received' | 'sent'>('all');
-  const [currentMonthIndex, setCurrentMonthIndex] = useState(9); // October
-  const months = ['January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026', 'July 2026', 'August 2026', 'September 2026', 'October 2026', 'November 2026', 'December 2026'];
+  const [currentMonthIndex, setCurrentMonthIndex] = useState(new Date().getMonth());
+  const months = [
+    'January 2026', 'February 2026', 'March 2026', 'April 2026', 'May 2026', 'June 2026',
+    'July 2026', 'August 2026', 'September 2026', 'October 2026', 'November 2026', 'December 2026',
+  ];
 
-  // App Lock State (Rule C2)
+  // App Lock
   const [isLocked, setIsLocked] = useState<boolean>(() => hasPinConfigured());
 
   // Modals
   const [showSimulator, setShowSimulator] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
-  const [showPermissionsGuide, setShowPermissionsGuide] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showWithdrawalsSubView, setShowWithdrawalsSubView] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -74,8 +76,8 @@ export default function App() {
   const [showBackupModal, setShowBackupModal] = useState(false);
   const [showVerifyModal, setShowVerifyModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
-  // Time Range (Requirement D)
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
     try {
       const stored = localStorage.getItem('ak_time_range_v2');
@@ -83,19 +85,9 @@ export default function App() {
         return stored as TimeRange;
       }
     } catch {}
-    return '7d';
+    return '1mo';
   });
 
-  // Compact telemetry status line visibility
-  const [showSyncStatusLine, setShowSyncStatusLine] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('ak_hide_status_line') !== 'true';
-    } catch {
-      return true;
-    }
-  });
-
-  // Per-bank Hidden State (Requirement E)
   const [hiddenBankIds, setHiddenBankIds] = useState<string[]>(() => db.getHiddenBankIds());
 
   const handleSetTimeRange = (range: TimeRange) => {
@@ -110,17 +102,11 @@ export default function App() {
     setHiddenBankIds(db.getHiddenBankIds());
   };
 
-  // Load all data from native SQLite and SharedPreferences
   const loadData = useCallback(async () => {
     try {
-      const [s, p, stat] = await Promise.all([
-        db.getSettings(),
-        db.getAllPayments(),
-        getNativeStatus(),
-      ]);
+      const [s, p] = await Promise.all([db.getSettings(), db.getAllPayments()]);
       setSettings(s);
       setPayments(p);
-      setNativeStatus(stat);
       setHiddenBankIds(db.getHiddenBankIds());
 
       const [a, w, b] = await Promise.all([
@@ -132,7 +118,7 @@ export default function App() {
       setWithdrawals(w);
       setMonthlyBudget(b);
     } catch (e) {
-      console.error('Failed loading data from native layer:', e);
+      console.error('Failed loading ledger data:', e);
     }
   }, []);
 
@@ -140,21 +126,16 @@ export default function App() {
     loadData();
     startKeepAliveService();
 
-    // Required: Poll getMessages() every 3-4 seconds
-    // Bug 1 Fix: Pause polling/refresh while any input, textarea, or select is focused
     const interval = setInterval(() => {
       if (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
         return;
       }
       loadData();
-    }, 3500);
+    }, 4000);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        // Lock app on background if PIN configured
-        if (hasPinConfigured()) {
-          setIsLocked(true);
-        }
+        if (hasPinConfigured()) setIsLocked(true);
       } else if (document.visibilityState === 'visible') {
         if (!document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
           loadData();
@@ -163,23 +144,13 @@ export default function App() {
       }
     };
 
-    const handleFocus = () => {
-      if (!document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
-        loadData();
-      }
-    };
-
     window.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleFocus);
-
     return () => {
       clearInterval(interval);
       window.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleFocus);
     };
   }, [loadData]);
 
-  // Android Back button handling: Closes active modal or returns to Home tab
   useEffect(() => {
     const handleAndroidBack = () => {
       if (showMenu) { setShowMenu(false); return; }
@@ -189,15 +160,12 @@ export default function App() {
       if (showBackupModal) { setShowBackupModal(false); return; }
       if (showVerifyModal) { setShowVerifyModal(false); return; }
       if (showAboutModal) { setShowAboutModal(false); return; }
-      if (showPermissionsGuide) { setShowPermissionsGuide(false); return; }
       if (showSimulator) { setShowSimulator(false); return; }
       if (currentTab !== 'home') { setCurrentTab('home'); return; }
     };
 
     window.addEventListener('androidBackPressed', handleAndroidBack);
-    return () => {
-      window.removeEventListener('androidBackPressed', handleAndroidBack);
-    };
+    return () => window.removeEventListener('androidBackPressed', handleAndroidBack);
   }, [
     showMenu,
     showSearch,
@@ -206,23 +174,24 @@ export default function App() {
     showBackupModal,
     showVerifyModal,
     showAboutModal,
-    showPermissionsGuide,
     showSimulator,
     currentTab,
   ]);
 
-  // Requirement B: Header amber pill when recent SMS was Ignored (called unconditionally before early returns)
-  const hasIgnoredRecentPayment = useMemo(() => {
-    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    return payments.some(p => p.timestamp > dayAgo && p.serverResult?.status === 'Ignored');
-  }, [payments]);
+  const serverIgnoredCount = useMemo(
+    () => payments.filter(p => p.serverIgnored || p.serverResult?.status === 'Ignored').length,
+    [payments]
+  );
 
-  // Requirement D: Memoized time-range filtered payments
+  const localUnsyncedCount = useMemo(
+    () => payments.filter(p => (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed') && !p.serverIgnored).length,
+    [payments]
+  );
+
   const rangeFilteredPayments = useMemo(() => {
     return filterPaymentsByTimeRange(payments, timeRange);
   }, [payments, timeRange]);
 
-  // Filter payments by account and direction if selected
   const displayedPayments = useMemo(() => {
     let list = rangeFilteredPayments;
     if (directionFilter !== 'all') {
@@ -240,30 +209,36 @@ export default function App() {
 
   if (!settings) {
     return (
-      <div className="min-h-screen bg-[#F4F7F5] flex items-center justify-center p-4">
-        <div className="flex items-center gap-2 text-sm font-semibold text-[#14503F]">
-          <RefreshCw size={18} className="animate-spin" />
-          <span>Starting Ak Financial Payment Desk...</span>
+      <div className="min-h-screen bg-[#F7F8F6] flex items-center justify-center p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold text-[#0F4C3A]">
+          <RefreshCw size={17} className="animate-spin" />
+          <span>Starting Ak Finance Ledger...</span>
         </div>
       </div>
     );
   }
 
   const t = translations[settings.language];
-  const pendingCount = nativeStatus.pending;
+  const serverUrlConfigured = Boolean(settings.serverUrl && settings.serverUrl.trim().length > 0);
+  const attentionCount = serverIgnoredCount + payments.filter(p => p.syncStatus === 'failed').length;
+
+  const pageTitleMap: Record<TabId, string> = {
+    home: settings.language === 'am' ? 'አጠቃላይ እይታ' : 'Overview',
+    payments: settings.language === 'am' ? 'የክፍያ መዝገብ' : 'Transactions Ledger',
+    insights: settings.language === 'am' ? 'ትንታኔ' : 'Analytics & Health',
+    organize: settings.language === 'am' ? 'ባንኮች እና በጀት' : 'Banks & Budgets',
+    ai: settings.language === 'am' ? 'እጀታ AI' : 'Ejeta AI',
+  };
 
   const handleToggleHideBalances = async (forceHide?: boolean) => {
-    if (!settings) return;
     const nextVal = typeof forceHide === 'boolean' ? forceHide : !settings.hideBalances;
-    const updated = { ...settings, hideBalances: nextVal };
-    await db.saveSettings(updated);
+    const updated = await db.saveSettings({ hideBalances: nextVal });
     setSettings(updated);
   };
 
   const handleToggleLanguage = async () => {
     const nextLang = settings.language === 'en' ? 'am' : 'en';
-    const updated = { ...settings, language: nextLang as any };
-    await db.saveSettings(updated);
+    const updated = await db.saveSettings({ language: nextLang });
     setSettings(updated);
   };
 
@@ -285,10 +260,61 @@ export default function App() {
 
   const handleSaveOverride = async (
     id: string,
-    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean }
+    override: { counterparty?: string | null; direction?: string | null; note?: string; isHidden?: boolean; tag?: string; reference?: string }
   ) => {
     await db.saveSmsOverride(id, override);
     await loadData();
+  };
+
+  const handleSyncPayment = async (id: string) => {
+    const res = await db.syncPaymentToServer(id);
+    setSyncNotice(res.message);
+    setTimeout(() => setSyncNotice(null), 4000);
+    await loadData();
+    return res;
+  };
+
+  const handleSyncSelected = async (ids: string[]) => {
+    let synced = 0;
+    let ignored = 0;
+    let failed = 0;
+    for (const id of ids) {
+      const res = await db.syncPaymentToServer(id);
+      if (res.ok) {
+        if (res.status === 'Ignored') ignored++;
+        else synced++;
+      } else {
+        failed++;
+      }
+    }
+    setSyncNotice(`Batch sync complete: ${synced} saved, ${ignored} server ignored, ${failed} failed.`);
+    setTimeout(() => setSyncNotice(null), 5000);
+    await loadData();
+  };
+
+  const handleBulkSync = async () => {
+    const res = await db.syncAllLocalToServer();
+    if (res.error) {
+      setSyncNotice(res.error);
+    } else {
+      setSyncNotice(`Synced ${res.synced} · Server Ignored ${res.ignored} · Failed ${res.failed}`);
+    }
+    setTimeout(() => setSyncNotice(null), 5000);
+    await loadData();
+    return res;
+  };
+
+  const handleAiParsePayment = async (id: string) => {
+    const res = await db.parseUnknownSmsWithAi(id);
+    if (!res.ok) {
+      setSyncNotice(res.error || 'Gemini AI parsing failed.');
+      setTimeout(() => setSyncNotice(null), 4000);
+    } else {
+      setSyncNotice('Gemini AI extracted transaction fields and saved to local cache.');
+      setTimeout(() => setSyncNotice(null), 4000);
+    }
+    await loadData();
+    return res;
   };
 
   const handleSaveOpeningBalance = async (bank: string, amount: number) => {
@@ -314,7 +340,8 @@ export default function App() {
     await loadData();
   };
 
-  const handleDeleteWithdrawal = async () => {
+  const handleDeleteWithdrawal = async (id: string) => {
+    await db.deleteWithdrawal(id);
     await loadData();
   };
 
@@ -327,318 +354,430 @@ export default function App() {
     setMonthlyBudget(b);
   };
 
-  const handlePrevMonth = () => {
-    setCurrentMonthIndex(prev => (prev > 0 ? prev - 1 : months.length - 1));
+  const openLedgerFiltered = (filter: LedgerStatusFilter) => {
+    setLedgerStatusFilter(filter);
+    setShowWithdrawalsSubView(false);
+    setCurrentTab('payments');
   };
 
-  const handleNextMonth = () => {
-    setCurrentMonthIndex(prev => (prev < months.length - 1 ? prev + 1 : 0));
-  };
-
-  const formatDebugTime = (ts: number) => {
-    if (!ts) return 'None';
-    const d = new Date(ts);
-    return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-  };
+  const navItems: { id: TabId; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
+    { id: 'home', label: settings.language === 'am' ? 'መነሻ' : 'Overview', icon: LayoutGrid },
+    { id: 'payments', label: settings.language === 'am' ? 'ክፍያዎች' : 'Ledger', icon: ReceiptText },
+    { id: 'insights', label: settings.language === 'am' ? 'ትንታኔ' : 'Insights', icon: BarChart3 },
+    { id: 'organize', label: settings.language === 'am' ? 'ባንኮች' : 'Banks & Budgets', icon: Layers },
+    { id: 'ai', label: settings.language === 'am' ? 'እጀታ AI' : 'Ejeta AI', icon: Sparkles },
+  ];
 
   return (
-    <div className="min-h-screen bg-[#F4F7F5] flex flex-col antialiased selection:bg-[#14503F]/20 font-sans pb-16">
-      {/* Top Header with live nativeStatus */}
-      <Header
-        settings={settings}
-        nativeStatus={nativeStatus}
-        hasIgnoredRecentPayment={hasIgnoredRecentPayment}
-        onToggleHideBalances={handleToggleHideBalances}
-        onToggleLanguage={handleToggleLanguage}
-        onOpenNotifications={() => setCurrentTab('payments')}
-        onOpenSettings={() => setShowSettingsModal(true)}
-        onOpenMenu={() => setShowMenu(true)}
-      />
-
-      {/* Main Container */}
-      <main className="flex-1 max-w-md w-full mx-auto px-4 py-3 space-y-4">
-        {/* TAB 1: HOME */}
-        {currentTab === 'home' && (
-          <div className="space-y-4">
-            {/* Compact 1-line Telemetry Status Bar (can be hidden with ✕) */}
-            {showSyncStatusLine && (
-              <div className="flex items-center justify-between bg-slate-900 text-slate-100 px-3 py-1.5 rounded-xl border border-slate-800 font-mono text-[10.5px] shadow-2xs">
-                <div className="flex items-center gap-1.5 truncate min-w-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                  <span className="text-slate-400 font-sans font-medium text-[10px]">SMS:</span>
-                  <span className="text-emerald-400 font-semibold truncate">
-                    {nativeStatus.lastSmsAt > 0
-                      ? `${nativeStatus.lastSmsSender || 'SMS'} ${formatDebugTime(nativeStatus.lastSmsAt)}`
-                      : 'None'}
-                  </span>
-                  <span className="text-slate-600">·</span>
-                  <span className="text-slate-400 font-sans font-medium text-[10px]">Server:</span>
-                  <span className={`font-bold ${
-                    nativeStatus.lastCode === 200 
-                      ? 'text-emerald-400' 
-                      : nativeStatus.lastCode > 0 
-                        ? 'text-rose-400' 
-                        : 'text-slate-400'
-                  }`}>
-                    {nativeStatus.lastCodeAt > 0 ? `HTTP ${nativeStatus.lastCode}` : 'None'}
-                  </span>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowSyncStatusLine(false);
-                    try { localStorage.setItem('ak_hide_status_line', 'true'); } catch {}
-                  }}
-                  className="text-slate-500 hover:text-slate-300 p-0.5 ml-2 shrink-0 text-[10.5px]"
-                  title="Hide status line"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-
-            {/* Real Bank Account Cards (Rule 3 & 4) */}
-            <AccountsCardStack
-              accounts={accounts}
-              payments={payments}
-              settings={settings}
-              selectedAccountId={selectedAccountId}
-              timeRange={timeRange}
-              hiddenBankIds={hiddenBankIds}
-              onSelectAccount={setSelectedAccountId}
-              onManageAccounts={() => setCurrentTab('organize')}
-              onSaveOpeningBalance={handleSaveOpeningBalance}
-              onToggleHideBank={handleToggleHideBank}
-              onAddCustomBank={handleAddCustomBank}
-            />
-
-            {/* Large Dark-Green NET MOVEMENT Card (Rule 6: dedupe aware) */}
-            <NetMovementCard
-              payments={displayedPayments}
-              accountCount={accounts.length}
-              settings={settings}
-              currentMonth={months[currentMonthIndex]}
-              timeRange={timeRange}
-              hiddenBankIds={hiddenBankIds}
-              activeDirection={directionFilter}
-              onFilterDirection={setDirectionFilter}
-              onChangeTimeRange={handleSetTimeRange}
-              onPrevMonth={handlePrevMonth}
-              onNextMonth={handleNextMonth}
-              onToggleHideBalances={handleToggleHideBalances}
-            />
-
-            {/* Quick-Action Shortcuts Tiles */}
-            <QuickActions
-              language={settings.language}
-              activeDirection={directionFilter}
-              onFilterDirection={setDirectionFilter}
-              onOpenTelegram={() => setCurrentTab('organize')}
-              onOpenSearch={() => setShowSearch(true)}
-              onOpenAccounts={() => setCurrentTab('organize')}
-              onOpenSimulator={() => setShowSimulator(true)}
-            />
-
-            {/* Setup Banner */}
-            <SetupBanner
-              language={settings.language}
-              onOpenSetup={() => setShowPermissionsGuide(true)}
-              serviceRunning={nativeStatus.smsGranted}
-            />
-
-            {/* Payments List (from native SQLite only with dedupe and edit) */}
-            <PaymentsList
-              payments={displayedPayments}
-              settings={settings}
-              activeDirection={directionFilter}
-              onFilterDirection={setDirectionFilter}
-              onRetrySinglePayment={handleRetrySinglePayment}
-              onDeletePayment={handleDeletePayment}
-              onSaveOverride={handleSaveOverride}
-            />
-
-            {displayedPayments.length > 8 && (
-              <button
-                onClick={() => setCurrentTab('payments')}
-                className="w-full py-2.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-[#14503F] hover:bg-slate-50 transition-colors shadow-xs"
-              >
-                {settings.language === 'am' ? 'ሁሉንም ክፍያዎች ተመልከት' : 'View All Captured Payments →'}
-              </button>
-            )}
+    <div className="min-h-screen bg-[#F7F8F6] text-slate-900 flex antialiased selection:bg-[#0F4C3A]/15">
+      {/* Desktop Persistent Sidebar (240px) */}
+      <aside className="hidden lg:flex lg:flex-col lg:w-60 lg:shrink-0 bg-white border-r border-slate-200 sticky top-0 h-screen">
+        <div className="px-4 py-4 border-b border-slate-200">
+          <div className="text-base font-bold tracking-tight text-slate-900">
+            Ak Finance
           </div>
-        )}
+          <div className="text-[11px] font-medium text-slate-500">
+            Ethiopian Treasury Desk
+          </div>
+        </div>
 
-        {/* TAB 2: INSIGHTS (Analytics) */}
-        {currentTab === 'insights' && (
-          <InsightsTab
-            payments={payments}
-            withdrawals={withdrawals}
-            settings={settings}
-            budget={monthlyBudget}
-            onUpdateBudget={handleUpdateBudget}
-          />
-        )}
-
-        {/* TAB 3: EJETA AI */}
-        {currentTab === 'ai' && (
-          <EjetaAiTab
-            payments={payments}
-            accounts={accounts}
-            settings={settings}
-          />
-        )}
-
-        {/* TAB 4: ORGANIZE */}
-        {currentTab === 'organize' && (
-          <OrganizeTab
-            accounts={accounts}
-            settings={settings}
-            onUpdateAccounts={handleUpdateAccounts}
-            budget={monthlyBudget}
-            onUpdateBudget={handleUpdateBudget}
-            payments={payments}
-            withdrawals={withdrawals}
-          />
-        )}
-
-        {/* TAB 5: PAYMENTS & WITHDRAWALS */}
-        {currentTab === 'payments' && (
-          <div className="space-y-4 pb-20">
-            {/* View Sub-selector (Payments vs Withdrawals) */}
-            <div className="flex items-center gap-1 p-1 bg-slate-200/80 rounded-2xl">
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto" aria-label="Desktop Navigation">
+          {navItems.map(item => {
+            const Icon = item.icon;
+            const active = currentTab === item.id;
+            return (
               <button
-                onClick={() => setShowWithdrawalsSubView(false)}
-                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all ${
-                  !showWithdrawalsSubView ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  if (item.id === 'payments') setLedgerStatusFilter('all');
+                  setCurrentTab(item.id);
+                }}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                  active
+                    ? 'bg-[#0F4C3A] text-white'
+                    : 'text-slate-700 hover:bg-slate-100'
                 }`}
               >
-                {t.allPayments} ({payments.length})
+                <span className="flex items-center gap-2.5">
+                  <Icon size={16} />
+                  <span>{item.label}</span>
+                </span>
+                {item.id === 'payments' && attentionCount > 0 && (
+                  <span className={`text-[11px] font-bold tabular-nums ${active ? 'text-amber-300' : 'text-amber-700'}`}>
+                    {attentionCount}
+                  </span>
+                )}
               </button>
-              <button
-                onClick={() => setShowWithdrawalsSubView(true)}
-                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all ${
-                  showWithdrawalsSubView ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {t.withdrawals} ({withdrawals.length})
+            );
+          })}
+
+          <div className="pt-4 mt-4 border-t border-slate-200 space-y-1">
+            <div className="px-3 pb-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+              Tools
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSimulator(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <MessageSquarePlus size={15} />
+              <span>Capture Bank SMS</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBackupModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <Database size={15} />
+              <span>Backup & Storage</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowVerifyModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <ShieldCheck size={15} />
+              <span>Verify Receipt</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSettingsModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <Settings size={15} />
+              <span>Settings</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSecurityModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <Lock size={15} />
+              <span>PIN Security</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAboutModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+            >
+              <Info size={15} />
+              <span>Parser & Banks</span>
+            </button>
+          </div>
+        </nav>
+
+        <div className="p-3 border-t border-slate-200 text-xs text-slate-600">
+          <div className="font-semibold text-slate-900">
+            {settings.mode === 'local' ? 'Standalone Local Mode' : 'Server Sync Mode'}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            {payments.length} stored · {serverIgnoredCount} server ignored
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Column */}
+      <div className="flex-1 min-w-0 flex flex-col pb-16 lg:pb-0">
+        <Header
+          settings={settings}
+          pageTitle={pageTitleMap[currentTab]}
+          onToggleHideBalances={handleToggleHideBalances}
+          onToggleLanguage={handleToggleLanguage}
+          onOpenSearch={() => setShowSearch(true)}
+          onOpenSimulator={() => setShowSimulator(true)}
+          onOpenMenu={() => setShowMenu(true)}
+        />
+
+        <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 py-4 space-y-4">
+          {syncNotice && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl px-4 py-2.5 text-xs font-semibold flex items-center justify-between gap-2">
+              <span>{syncNotice}</span>
+              <button type="button" onClick={() => setSyncNotice(null)} className="text-emerald-700 hover:text-emerald-950 font-bold">
+                ✕
               </button>
             </div>
+          )}
 
-            {!showWithdrawalsSubView ? (
-              <>
-                {/* Time Range Filter Chips (Requirement D) */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-                  {(['1h', '1d', '7d', '1mo', '1y', 'all'] as TimeRange[]).map((r) => (
-                    <button
-                      key={r}
-                      onClick={() => handleSetTimeRange(r)}
-                      className={`px-3 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
-                        timeRange === r
-                          ? 'bg-[#14503F] text-white shadow-xs'
-                          : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      {r === '1h' ? (settings.language === 'am' ? '1ሰዓት' : '1h') :
-                       r === '1d' ? (settings.language === 'am' ? '1ቀን' : '1d') :
-                       r === '7d' ? (settings.language === 'am' ? '7ቀን' : '7d') :
-                       r === '1mo' ? (settings.language === 'am' ? '1ወር' : '1mo') :
-                       r === '1y' ? (settings.language === 'am' ? '1ዓመት' : '1y') :
-                       (settings.language === 'am' ? 'ሁሉም' : 'All')}
-                    </button>
-                  ))}
+          {/* TAB 1: OVERVIEW */}
+          {currentTab === 'home' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+                <div className="xl:col-span-7">
+                  <AccountsCardStack
+                    accounts={accounts}
+                    payments={payments}
+                    settings={settings}
+                    selectedAccountId={selectedAccountId}
+                    timeRange={timeRange}
+                    hiddenBankIds={hiddenBankIds}
+                    onSelectAccount={setSelectedAccountId}
+                    onManageAccounts={() => setCurrentTab('organize')}
+                    onSaveOpeningBalance={handleSaveOpeningBalance}
+                    onToggleHideBank={handleToggleHideBank}
+                    onAddCustomBank={handleAddCustomBank}
+                  />
                 </div>
-
-                {/* Bank Filter Chips Bar */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-                  <button
-                    onClick={() => setSelectedAccountId(null)}
-                    className={`px-2.5 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
-                      !selectedAccountId
-                        ? 'bg-slate-900 text-white shadow-xs'
-                        : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    {settings.language === 'am' ? 'ሁሉም ባንኮች' : 'All Banks'}
-                  </button>
-                  {accounts.map(acc => (
-                    <button
-                      key={acc.id}
-                      onClick={() => setSelectedAccountId(selectedAccountId === acc.id ? null : acc.id)}
-                      className={`flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-full transition-all shrink-0 ${
-                        selectedAccountId === acc.id
-                          ? 'bg-[#14503F] text-white shadow-xs'
-                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      {acc.logoUrl && (
-                        <img src={acc.logoUrl} alt={acc.name} className="w-3.5 h-3.5 object-contain rounded-full" />
-                      )}
-                      <span>{acc.shortCode || acc.name}</span>
-                    </button>
-                  ))}
+                <div className="xl:col-span-5">
+                  <NetMovementCard
+                    payments={displayedPayments}
+                    accountCount={accounts.length}
+                    settings={settings}
+                    currentMonth={months[currentMonthIndex]}
+                    timeRange={timeRange}
+                    hiddenBankIds={hiddenBankIds}
+                    activeDirection={directionFilter}
+                    onFilterDirection={setDirectionFilter}
+                    onChangeTimeRange={handleSetTimeRange}
+                    onPrevMonth={() => setCurrentMonthIndex(p => (p > 0 ? p - 1 : months.length - 1))}
+                    onNextMonth={() => setCurrentMonthIndex(p => (p < months.length - 1 ? p + 1 : 0))}
+                    onToggleHideBalances={handleToggleHideBalances}
+                  />
                 </div>
+              </div>
 
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-slate-400">
-                    {pendingCount > 0 ? (
-                      <span className="text-amber-700 font-semibold">
-                        {pendingCount} payments waiting in native SQLite queue
-                      </span>
-                    ) : (
-                      'All records verified & synced'
+              {/* Conditional Action Strip for Server Ignored / Unsynced Local Records */}
+              {(serverIgnoredCount > 0 || localUnsyncedCount > 0) && (
+                <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <AlertTriangle size={15} className="text-amber-600 shrink-0" />
+                    <span>
+                      {localUnsyncedCount > 0
+                        ? `${localUnsyncedCount} local unsent transaction${localUnsyncedCount > 1 ? 's' : ''} saved on device (select specific rows to sync).`
+                        : `${serverIgnoredCount} transaction${serverIgnoredCount > 1 ? 's' : ''} ignored by server webhook (parsed & preserved locally).`}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {localUnsyncedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => openLedgerFiltered('local')}
+                        className="px-3 py-1.5 rounded-lg border border-[#0F4C3A] bg-emerald-50 text-[#0F4C3A] font-semibold whitespace-nowrap"
+                      >
+                        Review Local Only ({localUnsyncedCount})
+                      </button>
+                    )}
+                    {serverIgnoredCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => openLedgerFiltered('server-ignored')}
+                        className="px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 font-semibold whitespace-nowrap"
+                      >
+                        Review Server Ignored ({serverIgnoredCount})
+                      </button>
+                    )}
+                    {localUnsyncedCount > 0 && serverUrlConfigured && (
+                      <button
+                        type="button"
+                        onClick={handleBulkSync}
+                        className="px-3 py-1.5 rounded-lg bg-[#0F4C3A] text-white font-semibold flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <CloudUpload size={13} />
+                        <span>Sync Local to Server</span>
+                      </button>
                     )}
                   </div>
+                </div>
+              )}
+
+              <PaymentsList
+                payments={displayedPayments}
+                settings={settings}
+                activeDirection={directionFilter}
+                onFilterDirection={setDirectionFilter}
+                onRetrySinglePayment={handleRetrySinglePayment}
+                onDeletePayment={handleDeletePayment}
+                onSaveOverride={handleSaveOverride}
+                onSyncPayment={handleSyncPayment}
+                onSyncSelected={handleSyncSelected}
+                onAiParsePayment={handleAiParsePayment}
+                serverUrlConfigured={serverUrlConfigured}
+                onOpenSettings={() => setShowSettingsModal(true)}
+                maxItems={8}
+              />
+
+              {displayedPayments.length > 8 && (
+                <button
+                  type="button"
+                  onClick={() => openLedgerFiltered('all')}
+                  className="w-full py-2.5 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-[#0F4C3A] hover:bg-slate-50"
+                >
+                  {settings.language === 'am' ? 'ሁሉንም ክፍያዎች ተመልከት' : `Open Full Ledger (${displayedPayments.length} records)`}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: LEDGER */}
+          {currentTab === 'payments' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg border border-slate-200">
                   <button
-                    onClick={() => setShowSearch(true)}
-                    className="text-xs font-bold text-[#14503F] hover:underline"
+                    type="button"
+                    onClick={() => setShowWithdrawalsSubView(false)}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-md whitespace-nowrap ${
+                      !showWithdrawalsSubView ? 'bg-white text-slate-900 border border-slate-200' : 'text-slate-600'
+                    }`}
                   >
-                    Filter & Search
+                    {t.allPayments} ({payments.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowWithdrawalsSubView(true)}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-md whitespace-nowrap ${
+                      showWithdrawalsSubView ? 'bg-white text-slate-900 border border-slate-200' : 'text-slate-600'
+                    }`}
+                  >
+                    {t.withdrawals} ({withdrawals.length})
                   </button>
                 </div>
 
-                <PaymentsList
-                  payments={displayedPayments}
+                {!showWithdrawalsSubView && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowBackupModal(true)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                    >
+                      Backup & Sync
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowSearch(true)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-[#0F4C3A] hover:bg-slate-50 whitespace-nowrap"
+                    >
+                      Filter & Search
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {!showWithdrawalsSubView ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                      {(['1h', '1d', '7d', '1mo', '1y', 'all'] as TimeRange[]).map(r => (
+                        <button
+                          key={r}
+                          type="button"
+                          onClick={() => handleSetTimeRange(r)}
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border whitespace-nowrap ${
+                            timeRange === r
+                              ? 'bg-[#0F4C3A] text-white border-[#0F4C3A]'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          {r === 'all' ? 'All Time' : r}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedAccountId(null)}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border whitespace-nowrap ${
+                          !selectedAccountId
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        All Banks
+                      </button>
+                      {accounts.map(acc => (
+                        <button
+                          key={acc.id}
+                          type="button"
+                          onClick={() => setSelectedAccountId(selectedAccountId === acc.id ? null : acc.id)}
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border whitespace-nowrap ${
+                            selectedAccountId === acc.id
+                              ? 'bg-[#0F4C3A] text-white border-[#0F4C3A]'
+                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          {acc.shortCode || acc.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <PaymentsList
+                    payments={displayedPayments}
+                    settings={settings}
+                    activeDirection={directionFilter}
+                    onFilterDirection={setDirectionFilter}
+                    onRetrySinglePayment={handleRetrySinglePayment}
+                    onDeletePayment={handleDeletePayment}
+                    onSaveOverride={handleSaveOverride}
+                    onSyncPayment={handleSyncPayment}
+                    onSyncSelected={handleSyncSelected}
+                    onAiParsePayment={handleAiParsePayment}
+                    serverUrlConfigured={serverUrlConfigured}
+                    initialStatusFilter={ledgerStatusFilter}
+                    onOpenSettings={() => setShowSettingsModal(true)}
+                  />
+                </>
+              ) : (
+                <WithdrawalsTab
+                  withdrawals={withdrawals}
+                  accounts={accounts}
                   settings={settings}
-                  activeDirection={directionFilter}
-                  onFilterDirection={setDirectionFilter}
-                  onRetrySinglePayment={handleRetrySinglePayment}
-                  onDeletePayment={handleDeletePayment}
-                  onSaveOverride={handleSaveOverride}
+                  onAddWithdrawal={handleAddWithdrawal}
+                  onDeleteWithdrawal={handleDeleteWithdrawal}
                 />
-              </>
-            ) : (
-              <WithdrawalsTab
-                withdrawals={withdrawals}
-                accounts={accounts}
-                settings={settings}
-                onAddWithdrawal={handleAddWithdrawal}
-                onDeleteWithdrawal={handleDeleteWithdrawal}
-              />
-            )}
-          </div>
-        )}
-      </main>
+              )}
+            </div>
+          )}
 
-      {/* Floating Action Button: Simulate Bank SMS (via Sync.save) */}
-      <button
-        onClick={() => setShowSimulator(true)}
-        className="fixed bottom-20 right-4 z-40 bg-[#14503F] text-white px-3.5 py-2.5 rounded-full shadow-xl hover:bg-[#0e3b2e] active:scale-95 transition-all flex items-center gap-2 border border-emerald-600/50 group"
-        title="Simulate incoming bank SMS via native pipeline"
-      >
-        <MessageSquarePlus size={17} className="group-hover:rotate-12 transition-transform" />
-        <span className="text-xs font-bold font-['Poppins',sans-serif] pr-1">
-          {settings.language === 'am' ? 'SMS ሞክር' : 'Test SMS'}
-        </span>
-      </button>
+          {/* TAB 3: INSIGHTS */}
+          {currentTab === 'insights' && (
+            <InsightsTab
+              payments={payments}
+              withdrawals={withdrawals}
+              settings={settings}
+              budget={monthlyBudget}
+              onUpdateBudget={handleUpdateBudget}
+            />
+          )}
 
-      {/* Bottom Nav */}
+          {/* TAB 4: ORGANIZE */}
+          {currentTab === 'organize' && (
+            <OrganizeTab
+              accounts={accounts}
+              settings={settings}
+              onUpdateAccounts={handleUpdateAccounts}
+              budget={monthlyBudget}
+              onUpdateBudget={handleUpdateBudget}
+              payments={payments}
+              withdrawals={withdrawals}
+            />
+          )}
+
+          {/* TAB 5: EJETA AI */}
+          {currentTab === 'ai' && (
+            <EjetaAiTab
+              payments={payments}
+              accounts={accounts}
+              settings={settings}
+              onUpdateSettings={handleUpdateSettings}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Mobile Bottom Navigation */}
       <BottomNav
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
+        onSelectTab={tab => {
+          if (tab === 'payments') setLedgerStatusFilter('all');
+          setCurrentTab(tab);
+        }}
         language={settings.language}
-        pendingCount={pendingCount}
+        attentionCount={attentionCount}
       />
 
-      {/* Simulator Modal */}
+      {/* Modals */}
       <SmsSimulatorModal
         isOpen={showSimulator}
         onClose={() => setShowSimulator(false)}
@@ -646,7 +785,6 @@ export default function App() {
         onSmsProcessed={loadData}
       />
 
-      {/* Search Modal */}
       <SearchModal
         isOpen={showSearch}
         onClose={() => setShowSearch(false)}
@@ -655,43 +793,31 @@ export default function App() {
         onSelectPayment={() => setCurrentTab('payments')}
       />
 
-      {/* Android Permissions Guide */}
-      <AndroidPermissionModal
-        isOpen={showPermissionsGuide}
-        onClose={() => setShowPermissionsGuide(false)}
-        language={settings.language}
-      />
-
-      {/* Settings Modal (Overlay) */}
       {showSettingsModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
-              <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                {t.settings}
-              </h3>
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-lg rounded-2xl p-5 border border-slate-200 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200 mb-3">
+              <h3 className="text-sm font-bold text-slate-900">{t.settings}</h3>
               <button
+                type="button"
                 onClick={() => setShowSettingsModal(false)}
-                className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
+                aria-label="Close settings"
+                className="w-8 h-8 rounded-lg border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-500 hover:text-slate-900"
               >
                 ✕
               </button>
             </div>
             <SettingsTab
               settings={settings}
-              onUpdateSettings={async s => {
-                await handleUpdateSettings(s);
-              }}
+              onUpdateSettings={handleUpdateSettings}
               onTriggerSyncAll={async () => {
-                await retryNow();
-                await loadData();
+                await handleBulkSync();
               }}
             />
           </div>
         </div>
       )}
 
-      {/* 3-Dot Header Menu (Rule C1) */}
       <HeaderMenu
         isOpen={showMenu}
         onClose={() => setShowMenu(false)}
@@ -703,21 +829,20 @@ export default function App() {
         isPinEnabled={hasPinConfigured()}
       />
 
-      {/* Security PIN Settings Modal (Rule C2) */}
       <SecuritySettingsModal
         isOpen={showSecurityModal}
         onClose={() => setShowSecurityModal(false)}
         onSettingsChanged={() => {}}
       />
 
-      {/* Backup & Restore Modal (Rule C6) */}
       <BackupRestoreModal
         isOpen={showBackupModal}
         onClose={() => setShowBackupModal(false)}
         onDataRestored={loadData}
+        onTriggerBulkSync={handleBulkSync}
+        serverUrlConfigured={serverUrlConfigured}
       />
 
-      {/* Local Verify Modal (Rule C5) */}
       <LocalVerifyModal
         isOpen={showVerifyModal}
         onClose={() => setShowVerifyModal(false)}
@@ -725,13 +850,11 @@ export default function App() {
         settings={settings}
       />
 
-      {/* About & Help Modal */}
       <AboutModal
         isOpen={showAboutModal}
         onClose={() => setShowAboutModal(false)}
       />
 
-      {/* App PIN Lock Screen (Rule C2) */}
       {isLocked && (
         <SecurityLockScreen
           onUnlock={() => {

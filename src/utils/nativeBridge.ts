@@ -1,6 +1,6 @@
 /**
- * Native Bridge Interface for Ak Financial
- * Bridges Capacitor Web layer with native Android SharedPreferences, SQLite (ejeta.db), and Sync Job
+ * Native Bridge Interface for Ak Finance
+ * Bridges Capacitor Web layer with native Android SharedPreferences, SQLite (ejeta.db), and local browser storage
  */
 
 export interface NativeSettings {
@@ -32,6 +32,26 @@ export interface NativeStatus {
   pending: number;
 }
 
+export interface StoragePersistenceStatus {
+  supported: boolean;
+  persisted: boolean;
+  usageBytes?: number;
+  quotaBytes?: number;
+}
+
+export interface AiParsedCacheEntry {
+  bank?: string;
+  type?: 'received' | 'sent' | 'unknown';
+  category?: string;
+  amount?: number;
+  fee?: number;
+  balance?: number;
+  counterparty?: string;
+  reference?: string;
+  receiptUrl?: string;
+  updatedAt: number;
+}
+
 export const isAndroidNative = (): boolean => {
   if (typeof window === 'undefined') return false;
   return !!(window as any).AndroidBridge?.isNative?.();
@@ -47,15 +67,19 @@ const WEB_STORAGE_KEYS = {
   SETTINGS: 'ak_native_settings_sim',
   MESSAGES: 'ak_native_messages_sim',
   STATUS: 'ak_native_status_sim',
+  AI_PARSED: 'ak_ai_parsed_cache_v1',
 };
+
+const DEFAULT_SENDERS_CSV =
+  'CBE,127,Telebirr,AwashBank,Awash,Dashen,DashenBank,BOA,Abyssinia,Zemen,Siinqee,eBirr,ZamZam,Bunna,Wegagen,CBEBirr,M-PESA,AbayBank,NibBank,Hibret,CoopBank,Tsedey';
 
 const DEFAULT_SETTINGS: NativeSettings = {
   url: '',
   token: '',
   method: 'GET',
   interval: 15,
-  mode: 'server',
-  senders: 'CBE,127,AwashBank,Dashen,BOA',
+  mode: 'local',
+  senders: DEFAULT_SENDERS_CSV,
 };
 
 export const getNativeSettings = async (): Promise<NativeSettings> => {
@@ -68,15 +92,14 @@ export const getNativeSettings = async (): Promise<NativeSettings> => {
         token: parsed.token || '',
         method: parsed.method === 'POST' ? 'POST' : 'GET',
         interval: Number(parsed.interval) || 15,
-        mode: parsed.mode === 'local' ? 'local' : 'server',
-        senders: parsed.senders || 'CBE,127,AwashBank,Dashen,BOA',
+        mode: parsed.mode === 'server' ? 'server' : 'local',
+        senders: parsed.senders || DEFAULT_SENDERS_CSV,
       };
     } catch (e) {
       console.warn('Failed parsing native settings:', e);
     }
   }
 
-  // Web simulator fallback
   try {
     const raw = localStorage.getItem(WEB_STORAGE_KEYS.SETTINGS);
     if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
@@ -96,7 +119,6 @@ export const saveNativeSettings = async (settings: Partial<NativeSettings>): Pro
     }
   }
 
-  // Web simulator fallback
   try {
     const current = await getNativeSettings();
     const merged = { ...current, ...settings };
@@ -118,7 +140,6 @@ export const getNativeMessages = async (): Promise<NativeSmsMessage[]> => {
     }
   }
 
-  // Web simulator fallback
   try {
     const raw = localStorage.getItem(WEB_STORAGE_KEYS.MESSAGES);
     if (raw) {
@@ -150,7 +171,6 @@ export const checkNativePermissions = async (): Promise<{ smsGranted: boolean; n
       return typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {}
   }
-  // Browser preview default
   return { smsGranted: true, notificationsGranted: true };
 };
 
@@ -180,6 +200,46 @@ export const openAndroidAppSettings = (): void => {
   }
 };
 
+export const getStoragePersistenceStatus = async (): Promise<StoragePersistenceStatus> => {
+  if (typeof navigator === 'undefined' || !navigator.storage) {
+    return { supported: false, persisted: false };
+  }
+  try {
+    const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
+    const estimate = navigator.storage.estimate ? await navigator.storage.estimate() : undefined;
+    return {
+      supported: true,
+      persisted,
+      usageBytes: estimate?.usage,
+      quotaBytes: estimate?.quota,
+    };
+  } catch {
+    return { supported: false, persisted: false };
+  }
+};
+
+export const requestPersistentStorage = async (): Promise<StoragePersistenceStatus> => {
+  if (typeof navigator === 'undefined' || !navigator.storage) {
+    return { supported: false, persisted: false };
+  }
+  try {
+    const persisted = navigator.storage.persist
+      ? await navigator.storage.persist()
+      : navigator.storage.persisted
+        ? await navigator.storage.persisted()
+        : false;
+    const estimate = navigator.storage.estimate ? await navigator.storage.estimate() : undefined;
+    return {
+      supported: true,
+      persisted,
+      usageBytes: estimate?.usage,
+      quotaBytes: estimate?.quota,
+    };
+  } catch {
+    return { supported: false, persisted: false };
+  }
+};
+
 export const getNativeStatus = async (): Promise<NativeStatus> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getStatus) {
     try {
@@ -198,7 +258,6 @@ export const getNativeStatus = async (): Promise<NativeStatus> => {
     }
   }
 
-  // Web simulator fallback
   const messages = await getNativeMessages();
   const pendingCount = messages.filter(m => m.status === 'pending' || m.status === 'failed').length;
   const lastMsg = messages[0];
@@ -206,33 +265,104 @@ export const getNativeStatus = async (): Promise<NativeStatus> => {
     smsGranted: true,
     lastSmsAt: lastMsg ? lastMsg.ts : 0,
     lastSmsSender: lastMsg ? lastMsg.sender : '',
-    lastCode: 200,
-    lastCodeAt: Date.now(),
+    lastCode: lastMsg?.code || 0,
+    lastCodeAt: lastMsg ? lastMsg.ts : 0,
     pending: pendingCount,
   };
 };
+
+let uniqueIdCounter = 0;
+function generateNumericId(): number {
+  uniqueIdCounter = (uniqueIdCounter + 1) % 1000;
+  return Date.now() * 1000 + uniqueIdCounter;
+}
 
 export const insertNativeTestSms = async (sender: string, body: string): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.insertTestSms) {
     return !!(window as any).AndroidBridge.insertTestSms(sender, body);
   }
 
-  // Web simulator fallback: insert into simulated messages store
   try {
     const list = await getNativeMessages();
     const settings = await getNativeSettings();
-    const isServer = settings.mode === 'server';
+    const isServer = settings.mode === 'server' && Boolean(settings.url?.trim());
     const newMsg: NativeSmsMessage = {
-      id: Date.now(),
+      id: generateNumericId(),
       sender,
       body,
       ts: Date.now(),
-      status: isServer ? (settings.url ? 'sent' : 'pending') : 'local',
-      tries: isServer ? 1 : 0,
-      err: isServer && !settings.url ? 'Server URL not configured' : null,
-      code: isServer ? (settings.url ? 200 : 0) : 0,
+      status: isServer ? 'pending' : 'local',
+      tries: 0,
+      err: null,
+      code: 0,
     };
     list.unshift(newMsg);
+    localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const insertNativeSmsWithMeta = async (msg: {
+  id?: number;
+  sender: string;
+  body: string;
+  ts?: number;
+  status?: NativeSmsMessage['status'];
+  tries?: number;
+  err?: string | null;
+  code?: number;
+}): Promise<number | null> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.insertTestSms) {
+    const ok = !!(window as any).AndroidBridge.insertTestSms(msg.sender, msg.body);
+    return ok ? (msg.id || generateNumericId()) : null;
+  }
+
+  try {
+    const list = await getNativeMessages();
+    const id = typeof msg.id === 'number' && !list.some(m => m.id === msg.id) ? msg.id : generateNumericId();
+    const entry: NativeSmsMessage = {
+      id,
+      sender: msg.sender,
+      body: msg.body,
+      ts: typeof msg.ts === 'number' && msg.ts > 0 ? msg.ts : Date.now(),
+      status: msg.status || 'local',
+      tries: msg.tries || 0,
+      err: msg.err ?? null,
+      code: msg.code || 0,
+    };
+    list.unshift(entry);
+    localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(list));
+    return id;
+  } catch {
+    return null;
+  }
+};
+
+export const updateNativeMessageStatus = async (
+  id: number,
+  status: NativeSmsMessage['status'],
+  code: number,
+  err: string | null = null
+): Promise<boolean> => {
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.updateMessageStatus) {
+    try {
+      return !!(window as any).AndroidBridge.updateMessageStatus(id, status, code, err || '');
+    } catch {}
+  }
+
+  try {
+    const list = await getNativeMessages();
+    const idx = list.findIndex(m => m.id === id);
+    if (idx < 0) return false;
+    list[idx] = {
+      ...list[idx],
+      status,
+      code,
+      err,
+      tries: (list[idx].tries || 0) + 1,
+    };
     localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(list));
     return true;
   } catch {
@@ -255,6 +385,86 @@ export const deleteNativeMessage = async (id: number): Promise<boolean> => {
   }
 };
 
+export const importNativeMessagesBatch = async (
+  incoming: Array<{
+    id?: number;
+    sender: string;
+    body: string;
+    ts?: number;
+    status?: NativeSmsMessage['status'];
+    tries?: number;
+    err?: string | null;
+    code?: number;
+  }>,
+  mode: 'merge' | 'replace' = 'merge'
+): Promise<{ importedCount: number; idRemap: Record<string, number> }> => {
+  const idRemap: Record<string, number> = {};
+
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.insertTestSms) {
+    let importedCount = 0;
+    for (const m of incoming) {
+      if (!m || !m.sender || !m.body) continue;
+      const ok = !!(window as any).AndroidBridge.insertTestSms(m.sender, m.body);
+      if (ok) importedCount++;
+    }
+    return { importedCount, idRemap };
+  }
+
+  const existing = mode === 'replace' ? [] : await getNativeMessages();
+  const usedIds = new Set<number>(existing.map(m => m.id));
+  const exactKeySet = new Set<string>(
+    existing.map(m => `${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}|${m.ts}`)
+  );
+
+  const result: NativeSmsMessage[] = [...existing];
+  let importedCount = 0;
+
+  for (const m of incoming) {
+    if (!m || !m.sender || !m.body) continue;
+    const ts = typeof m.ts === 'number' && m.ts > 0 ? m.ts : Date.now();
+    const exactKey = `${m.sender.toLowerCase()}|${m.body.trim()}|${ts}`;
+    if (mode === 'merge' && exactKeySet.has(exactKey)) {
+      continue;
+    }
+
+    let finalId: number;
+    if (typeof m.id === 'number' && Number.isFinite(m.id) && !usedIds.has(m.id)) {
+      finalId = m.id;
+    } else {
+      finalId = generateNumericId();
+      while (usedIds.has(finalId)) {
+        finalId = generateNumericId() + 1;
+      }
+      if (typeof m.id === 'number') {
+        idRemap[String(m.id)] = finalId;
+      }
+    }
+    usedIds.add(finalId);
+    exactKeySet.add(exactKey);
+
+    const allowedStatus: NativeSmsMessage['status'] =
+      m.status === 'sent' || m.status === 'pending' || m.status === 'failed' || m.status === 'local'
+        ? m.status
+        : 'local';
+
+    result.push({
+      id: finalId,
+      sender: m.sender,
+      body: m.body,
+      ts,
+      status: allowedStatus,
+      tries: Number(m.tries) || 0,
+      err: m.err ?? null,
+      code: Number(m.code) || 0,
+    });
+    importedCount++;
+  }
+
+  result.sort((a, b) => b.ts - a.ts || b.id - a.id);
+  localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(result));
+  return { importedCount, idRemap };
+};
+
 export const clearAllNativeMessages = async (): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.clearAll) {
     return !!(window as any).AndroidBridge.clearAll();
@@ -262,6 +472,20 @@ export const clearAllNativeMessages = async (): Promise<boolean> => {
 
   try {
     localStorage.removeItem(WEB_STORAGE_KEYS.MESSAGES);
+    localStorage.removeItem('ak_server_results_sim');
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const clearAllNativeState = async (): Promise<boolean> => {
+  await clearAllNativeMessages();
+  try {
+    localStorage.removeItem('ak_sms_overrides_sim');
+    localStorage.removeItem('ak_opening_balances_sim');
+    localStorage.removeItem('ak_counterparty_tags_sim');
+    localStorage.removeItem(WEB_STORAGE_KEYS.AI_PARSED);
     return true;
   } catch {
     return false;
@@ -275,6 +499,7 @@ export interface SmsOverride {
   tag?: string;
   isHidden: boolean;
   reference?: string;
+  category?: string;
 }
 
 export type SmsOverridesMap = Record<string, SmsOverride>;
@@ -338,7 +563,8 @@ export const saveNativeSmsOverride = async (
   note: string,
   isHidden: boolean,
   tag: string = '',
-  reference: string = ''
+  reference: string = '',
+  category?: string
 ): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveSmsOverrideWithTag) {
     try {
@@ -352,20 +578,38 @@ export const saveNativeSmsOverride = async (
 
   try {
     const current = await getNativeSmsOverrides();
+    const prev = current[String(smsId)] || {};
     current[String(smsId)] = {
-      ...(current[String(smsId)] || {}),
+      ...prev,
       counterparty,
       direction: direction as any,
       note,
       tag: tag || '',
       isHidden,
-      reference: reference || current[String(smsId)]?.reference || undefined,
+      reference: reference || prev.reference || undefined,
+      category: category || prev.category || undefined,
     };
     localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
     return true;
   } catch {
     return false;
   }
+};
+
+export const getAiParsedCache = (): Record<string, AiParsedCacheEntry> => {
+  try {
+    const raw = localStorage.getItem(WEB_STORAGE_KEYS.AI_PARSED);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+};
+
+export const saveAiParsedCacheEntry = (smsId: string, entry: AiParsedCacheEntry): void => {
+  try {
+    const current = getAiParsedCache();
+    current[String(smsId)] = entry;
+    localStorage.setItem(WEB_STORAGE_KEYS.AI_PARSED, JSON.stringify(current));
+  } catch {}
 };
 
 export const getNativeCounterpartyTags = async (): Promise<CounterpartyTagsMap> => {
@@ -403,12 +647,27 @@ export const saveNativeCounterpartyTag = async (counterparty: string, tag: strin
 export const getNativeSenderBankMap = async (): Promise<SenderBankMap> => {
   const defaults: SenderBankMap = {
     '127': 'Telebirr',
-    'CBE': 'Commercial Bank of Ethiopia',
+    'Telebirr': 'Telebirr',
+    'CBE': 'CBE',
+    'CBEBirr': 'CBE Birr',
     'AwashBank': 'Awash Bank',
     'Awash': 'Awash Bank',
     'Dashen': 'Dashen Bank',
+    'DashenBank': 'Dashen Bank',
     'BOA': 'Bank of Abyssinia',
     'Abyssinia': 'Bank of Abyssinia',
+    'Zemen': 'Zemen Bank',
+    'Siinqee': 'Siinqee Bank',
+    'eBirr': 'eBirr',
+    'ZamZam': 'ZamZam Bank',
+    'Bunna': 'Bunna Bank',
+    'Wegagen': 'Wegagen Bank',
+    'M-PESA': 'M-Pesa',
+    'AbayBank': 'Abay Bank',
+    'NibBank': 'Nib Bank',
+    'Hibret': 'Hibret Bank',
+    'CoopBank': 'Coop Bank',
+    'Tsedey': 'Tsedey Bank',
   };
 
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.getSenderBankMap) {
@@ -487,6 +746,125 @@ export const getNativeServerResults = async (): Promise<Record<string, NativeSer
   return {};
 };
 
+export const saveNativeServerResultsBatch = async (
+  incoming: Record<string, any>,
+  mode: 'merge' | 'replace' = 'merge',
+  idRemap: Record<string, number> = {}
+): Promise<boolean> => {
+  try {
+    const current = mode === 'replace' ? {} : await getNativeServerResults();
+    for (const [key, sr] of Object.entries(incoming)) {
+      if (!sr || typeof sr !== 'object') continue;
+      const origId = String(sr.smsId ?? key);
+      const targetId = idRemap[origId] ?? Number(origId);
+      if (!Number.isFinite(targetId)) continue;
+      const targetKey = String(targetId);
+      if (mode === 'merge' && current[targetKey]) continue;
+      current[targetKey] = {
+        smsId: targetId,
+        httpCode: Number(sr.httpCode || 200),
+        status: (sr.status as any) || 'Unknown',
+        ref: sr.ref || '',
+        reason: sr.reason || '',
+        raw: sr.raw || '',
+        at: Number(sr.at) || Date.now(),
+      };
+    }
+    localStorage.setItem('ak_server_results_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const saveNativeSmsOverridesBatch = async (
+  incoming: Record<string, any>,
+  mode: 'merge' | 'replace' = 'merge',
+  idRemap: Record<string, number> = {}
+): Promise<boolean> => {
+  try {
+    const current = mode === 'replace' ? {} : await getNativeSmsOverrides();
+    for (const [key, ov] of Object.entries(incoming)) {
+      if (!ov || typeof ov !== 'object') continue;
+      const targetId = idRemap[key] ?? key;
+      const targetKey = String(targetId);
+      if (mode === 'merge' && current[targetKey]) continue;
+      current[targetKey] = {
+        counterparty: ov.counterparty ?? null,
+        direction: (ov.direction as any) ?? null,
+        note: ov.note || '',
+        tag: ov.tag || '',
+        isHidden: !!ov.isHidden,
+        reference: ov.reference || undefined,
+        category: ov.category || undefined,
+      };
+    }
+    localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const saveNativeOpeningBalancesBatch = async (
+  incoming: Record<string, number>,
+  mode: 'merge' | 'replace' = 'merge'
+): Promise<boolean> => {
+  try {
+    const current = mode === 'replace' ? {} : await getNativeOpeningBalances();
+    for (const [bank, amount] of Object.entries(incoming)) {
+      if (typeof amount === 'number' && Number.isFinite(amount)) {
+        if (mode === 'replace' || current[bank] === undefined) {
+          current[bank] = amount;
+        }
+      }
+    }
+    localStorage.setItem('ak_opening_balances_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const saveNativeCounterpartyTagsBatch = async (
+  incoming: Record<string, string>,
+  mode: 'merge' | 'replace' = 'merge'
+): Promise<boolean> => {
+  try {
+    const current = mode === 'replace' ? {} : await getNativeCounterpartyTags();
+    for (const [cp, tag] of Object.entries(incoming)) {
+      if (typeof tag === 'string' && tag.trim()) {
+        const cleanCp = cp.trim();
+        if (mode === 'replace' || !current[cleanCp]) {
+          current[cleanCp] = tag.trim();
+        }
+      }
+    }
+    localStorage.setItem('ak_counterparty_tags_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const saveNativeSenderBankMapBatch = async (
+  incoming: Record<string, string>,
+  mode: 'merge' | 'replace' = 'merge'
+): Promise<boolean> => {
+  try {
+    const current = mode === 'replace' ? {} : await getNativeSenderBankMap();
+    for (const [sender, bank] of Object.entries(incoming)) {
+      if (typeof bank === 'string' && bank.trim()) {
+        current[sender] = bank.trim();
+      }
+    }
+    localStorage.setItem('ak_sender_bank_map_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export const saveNativeServerResult = async (
   smsId: number,
   httpCode: number,
@@ -538,7 +916,6 @@ export const saveNativeFile = async (
     }
   }
 
-  // Web fallback using blob download + verified length check
   try {
     const blob = new Blob([content], { type: mimeType });
     if (blob.size === 0) {
@@ -571,7 +948,6 @@ export const shareNativeFile = async (
     }
   }
 
-  // Web fallback: Web Share API if available, or copy to clipboard
   try {
     if (navigator.share) {
       const file = new File([content], filename, { type: mimeType });
@@ -586,4 +962,3 @@ export const shareNativeFile = async (
     return false;
   }
 };
-

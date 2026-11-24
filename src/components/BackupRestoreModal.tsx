@@ -1,52 +1,62 @@
-import React, { useState, useRef } from 'react';
-import { 
-  Database, 
-  Download, 
-  Upload, 
-  FileSpreadsheet, 
-  Check, 
-  AlertCircle, 
-  X, 
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  Database,
+  Download,
+  Upload,
+  FileSpreadsheet,
+  Check,
+  AlertCircle,
+  X,
   RefreshCw,
   HardDrive,
   Share2,
-  ShieldAlert,
   Copy,
-  FileCheck
+  FileCheck,
+  CloudUpload,
+  ShieldCheck,
 } from 'lucide-react';
 import { db } from '../services/db.ts';
-import { saveNativeFile, shareNativeFile } from '../utils/nativeBridge.ts';
+import {
+  saveNativeFile,
+  shareNativeFile,
+  getStoragePersistenceStatus,
+  requestPersistentStorage,
+  StoragePersistenceStatus,
+} from '../utils/nativeBridge.ts';
 
 interface BackupRestoreModalProps {
   isOpen: boolean;
   onClose: () => void;
   onDataRestored: () => Promise<void>;
+  onTriggerBulkSync?: () => Promise<{ synced: number; ignored: number; failed: number; error?: string }>;
+  serverUrlConfigured?: boolean;
 }
 
 export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   isOpen,
   onClose,
   onDataRestored,
+  onTriggerBulkSync,
+  serverUrlConfigured,
 }) => {
   const [loading, setLoading] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  
-  // Requirement E3: Secret key off by default
   const [includeSecretKey, setIncludeSecretKey] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<StoragePersistenceStatus>({
+    supported: false,
+    persisted: false,
+  });
 
-  // Helper for real-time filename with exact date and seconds
-  const getDetailedTimestamp = () => {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
-  };
-
-  // Requirement E4: Restore preview & confirmation state
   const [pendingRestore, setPendingRestore] = useState<{
     rawJson: string;
     version: number;
     paymentsCount: number;
+    sentCount: number;
+    localCount: number;
+    pendingOrFailedCount: number;
+    serverIgnoredCount: number;
     banksCount: number;
     tagsCount: number;
     hasSecretKey: boolean;
@@ -61,17 +71,42 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
 
   const [confirmReplaceText, setConfirmReplaceText] = useState('');
   const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    getStoragePersistenceStatus().then(setStorageStatus);
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const getDetailedTimestamp = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  };
 
   const formatFileSize = (bytes: number): string => {
     if (bytes < 1024) return `${bytes} B`;
     return `${(bytes / 1024).toFixed(1)} KB`;
   };
 
-  // Requirement E1 & E2: Native SAF/FileProvider export with write-back verification & real-time seconds
+  const formatMb = (bytes?: number) => {
+    if (bytes === undefined) return 'N/A';
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const handleRequestPersistence = async () => {
+    setErrorMsg(null);
+    const updated = await requestPersistentStorage();
+    setStorageStatus(updated);
+    if (updated.persisted) {
+      setSuccessMsg('Persistent local storage granted by device browser.');
+    } else {
+      setSuccessMsg('Storage active (localStorage & device storage checked).');
+    }
+  };
+
   const handleExportBackup = async (shareDirectly: boolean = false) => {
     setLoading(true);
     setErrorMsg(null);
@@ -86,7 +121,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         if (shared) {
           const byteLen = new Blob([json]).size;
           setSuccessMsg(
-            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(byteLen)} (Shared as ${filename})`
+            `Shared ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags (${formatFileSize(byteLen)} · ${filename})`
           );
         } else {
           setErrorMsg('Failed to open system share sheet.');
@@ -95,7 +130,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         const res = await saveNativeFile(filename, 'application/json', json);
         if (res.success && res.bytes && res.bytes > 0) {
           setSuccessMsg(
-            `Saved ✓ ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags, ${formatFileSize(res.bytes)} (${filename})`
+            `Saved ${inspection.paymentsCount} payments, ${inspection.banksCount} banks, ${inspection.tagsCount} tags (${formatFileSize(res.bytes)} · ${filename})`
           );
         } else {
           setErrorMsg(res.error || 'Export failed: written file was 0 bytes.');
@@ -108,7 +143,6 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     }
   };
 
-  // Requirement E5: UTF-8 BOM CSV export with real-time seconds
   const handleExportCsv = async (shareDirectly: boolean = false) => {
     setLoading(true);
     setErrorMsg(null);
@@ -121,14 +155,14 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         const shared = await shareNativeFile(filename, 'text/csv;charset=utf-8;', csv);
         if (shared) {
           const byteLen = new Blob([csv]).size;
-          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(byteLen)} (${filename})`);
+          setSuccessMsg(`CSV shared (${formatFileSize(byteLen)} · ${filename})`);
         } else {
           setErrorMsg('Failed to open share sheet.');
         }
       } else {
         const res = await saveNativeFile(filename, 'text/csv;charset=utf-8;', csv);
         if (res.success && res.bytes && res.bytes > 0) {
-          setSuccessMsg(`CSV Saved ✓ ${formatFileSize(res.bytes)} with UTF-8 BOM (${filename})`);
+          setSuccessMsg(`CSV saved (${formatFileSize(res.bytes)} UTF-8 BOM · ${filename})`);
         } else {
           setErrorMsg(res.error || 'CSV export failed (0 bytes).');
         }
@@ -140,7 +174,6 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     }
   };
 
-  // Requirement E4: Restore file chosen -> inspect and show summary with real-time details
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -161,6 +194,10 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
         rawJson: text,
         version: inspection.version || 1,
         paymentsCount: inspection.paymentsCount,
+        sentCount: inspection.sentCount,
+        localCount: inspection.localCount,
+        pendingOrFailedCount: inspection.pendingOrFailedCount,
+        serverIgnoredCount: inspection.serverIgnoredCount,
         banksCount: inspection.banksCount,
         tagsCount: inspection.tagsCount,
         hasSecretKey: inspection.hasSecretKey,
@@ -180,7 +217,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const handleExecuteRestore = async (mode: 'merge' | 'replace') => {
     if (!pendingRestore) return;
     if (mode === 'replace' && confirmReplaceText.trim().toUpperCase() !== 'RESTORE') {
-      setErrorMsg('Please type "RESTORE" to confirm full database replacement.');
+      setErrorMsg('Type "RESTORE" to confirm full replacement.');
       return;
     }
 
@@ -191,12 +228,11 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
       if (res.success) {
         await onDataRestored();
         setSuccessMsg(
-          `Restored ✓ ${res.count} payments, ${res.banksCount} banks, ${res.tagsCount} tags (${mode === 'merge' ? 'Merged safely' : 'Replaced'})`
+          `Restored to original places: ${res.count} records (${res.localCount} local kept offline without auto-sync), ${res.banksCount} banks, ${res.tagsCount} tags (${mode === 'merge' ? 'Installed safely' : 'Replaced all'})`
         );
         setPendingRestore(null);
         setShowReplaceConfirm(false);
         setConfirmReplaceText('');
-        setTimeout(() => setSuccessMsg(null), 5000);
       } else {
         setErrorMsg(res.error || 'Failed to restore backup.');
       }
@@ -211,34 +247,56 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     try {
       const json = await db.exportFullBackupJson(includeSecretKey);
       await navigator.clipboard.writeText(json);
-      setSuccessMsg('Backup JSON copied to clipboard!');
-      setTimeout(() => setSuccessMsg(null), 3000);
+      setSuccessMsg('Backup JSON copied to clipboard.');
     } catch {
       setErrorMsg('Could not copy to clipboard.');
     }
   };
 
+  const handleBulkSync = async () => {
+    setSyncLoading(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = onTriggerBulkSync ? await onTriggerBulkSync() : await db.syncAllLocalToServer();
+      await onDataRestored();
+      if (res.error) {
+        setErrorMsg(res.error);
+      } else {
+        setSuccessMsg(
+          `Sync finished: ${res.synced} saved · ${res.ignored} server ignored (preserved locally) · ${res.failed} failed`
+        );
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Bulk sync failed.');
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 space-y-4 max-h-[90dvh] overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-lg rounded-2xl p-5 border border-slate-200 space-y-4 max-h-[90dvh] overflow-y-auto">
         {/* Header */}
-        <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-emerald-50 text-[#14503F] flex items-center justify-center">
-              <Database size={17} />
+        <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-[#0F4C3A] text-white flex items-center justify-center">
+              <Database size={16} />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif]">
-                Backup & Restore Data
+              <h3 className="text-sm font-bold text-slate-900">
+                Backup, Storage & Server Sync
               </h3>
-              <p className="text-[10px] text-slate-400">
-                Safe SQLite export, merge & Android storage
+              <p className="text-xs text-slate-500">
+                Timestamped JSON/CSV exports, persistent storage & original-place restore
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800 transition-colors"
+            aria-label="Close backup modal"
+            className="w-8 h-8 rounded-lg border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-500 hover:text-slate-900"
           >
             <X size={15} />
           </button>
@@ -246,101 +304,97 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
 
         {/* Live Feedback Banners */}
         {successMsg && (
-          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 animate-in fade-in">
-            <Check size={14} className="text-emerald-600 shrink-0" />
-            <span className="break-all">{successMsg}</span>
+          <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 p-3 rounded-xl text-xs font-semibold flex items-start gap-2">
+            <Check size={14} className="text-emerald-700 shrink-0 mt-0.5" />
+            <span className="break-words">{successMsg}</span>
           </div>
         )}
 
         {errorMsg && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 p-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 animate-in fade-in">
-            <AlertCircle size={14} className="text-rose-600 shrink-0" />
-            <span className="break-all">{errorMsg}</span>
+          <div className="bg-rose-50 border border-rose-200 text-rose-900 p-3 rounded-xl text-xs font-semibold flex items-start gap-2">
+            <AlertCircle size={14} className="text-rose-700 shrink-0 mt-0.5" />
+            <span className="break-words">{errorMsg}</span>
           </div>
         )}
 
-        {/* Restore Confirmation Dialog (Requirement E4) */}
+        {/* Restore Preview */}
         {pendingRestore && (
-          <div className="bg-amber-50/90 border border-amber-300 rounded-2xl p-4 space-y-3 animate-in fade-in">
-            <div className="flex items-center gap-2 text-amber-900 font-bold text-xs">
-              <FileCheck size={16} className="text-amber-700" />
-              <span>Backup Summary</span>
+          <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2 text-amber-950 font-bold text-xs">
+              <FileCheck size={15} className="text-amber-700" />
+              <span>Backup Inspection Summary</span>
             </div>
-            <div className="text-xs text-amber-900 space-y-1 bg-white/70 p-3 rounded-xl border border-amber-200">
-              <p className="font-semibold text-slate-900">
-                Found: <span className="font-bold text-[#14503F]">{pendingRestore.paymentsCount} payments</span>,{' '}
-                <span className="font-bold text-[#14503F]">{pendingRestore.banksCount} banks</span>,{' '}
-                <span className="font-bold text-[#14503F]">{pendingRestore.tagsCount} tags</span>
-              </p>
+            <div className="text-xs space-y-1.5 bg-white p-3 rounded-lg border border-amber-200">
+              <div className="font-semibold text-slate-900">
+                {pendingRestore.paymentsCount} payments · {pendingRestore.banksCount} banks · {pendingRestore.tagsCount} tags
+              </div>
+              <div className="text-xs text-slate-700 font-medium">
+                {pendingRestore.sentCount} Sent · {pendingRestore.localCount} Local Unsent · {pendingRestore.serverIgnoredCount} Server Ignored
+                {pendingRestore.pendingOrFailedCount > 0 ? ` · ${pendingRestore.pendingOrFailedCount} Pending/Failed` : ''}
+              </div>
               {pendingRestore.exportedAt && (
-                <p className="text-[11px] text-slate-600 font-mono">
-                  Exported: <span className="font-bold text-slate-800">{pendingRestore.exportedAt}</span>
-                </p>
-              )}
-              {pendingRestore.financialSummary && (
-                <div className="text-[10.5px] text-emerald-900 font-mono bg-emerald-50/80 p-1.5 rounded-lg border border-emerald-100 flex items-center justify-between">
-                  <span>In: +ETB {pendingRestore.financialSummary.totalReceivedETB || '0.00'}</span>
-                  <span>Out: -ETB {pendingRestore.financialSummary.totalSentETB || '0.00'}</span>
-                  <span className="font-bold">Net: ETB {pendingRestore.financialSummary.netCashETB || '0.00'}</span>
+                <div className="text-xs text-slate-600 font-mono">
+                  Exported: {pendingRestore.exportedAt}
                 </div>
               )}
-              <p className="text-[11px] text-slate-500">
-                Schema Version: {pendingRestore.version} · Secret Key in backup: {pendingRestore.hasSecretKey ? 'Yes' : 'No'}
-              </p>
-              <div className="text-[10px] text-emerald-800 font-semibold pt-1 flex items-center gap-1.5 bg-emerald-50/90 p-2 rounded-xl border border-emerald-200">
-                <FileCheck size={14} className="text-emerald-700 shrink-0" />
-                <span>Safe Additive Update: New records are added without deleting any existing payments or bank accounts.</span>
+              {pendingRestore.financialSummary && (
+                <div className="text-xs text-emerald-900 font-mono tabular-nums pt-1 border-t border-slate-100">
+                  In: +{pendingRestore.financialSummary.totalReceivedETB || '0.00'} · Out: -{pendingRestore.financialSummary.totalSentETB || '0.00'} · Net: {pendingRestore.financialSummary.netCashETB || '0.00'} ETB
+                </div>
+              )}
+              <div className="text-[11px] text-slate-500">
+                Schema v{pendingRestore.version} · Secret Key included: {pendingRestore.hasSecretKey ? 'Yes' : 'No'}
               </div>
-              <p className="text-[11px] text-slate-700 font-medium pt-1">
-                Choose installation method:
-              </p>
+              <div className="text-[11px] font-semibold text-[#0F4C3A] bg-emerald-50 border border-emerald-200 rounded-md px-2.5 py-1.5">
+                Imported local/unsent records will NOT be auto-synced to the server — select and sync them manually when ready.
+              </div>
             </div>
 
             {!showReplaceConfirm ? (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
                   disabled={loading}
                   onClick={() => handleExecuteRestore('merge')}
-                  className="flex-2 py-2 px-3 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-xs hover:bg-[#0e3b2e] active:scale-98 transition-all flex items-center justify-center gap-1.5"
+                  className="flex-1 py-2 px-3 rounded-lg bg-[#0F4C3A] text-white text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
                 >
-                  <Check size={14} />
+                  <Check size={13} />
                   <span>Install Update (Never Delete)</span>
                 </button>
                 <button
                   type="button"
                   disabled={loading}
                   onClick={() => setShowReplaceConfirm(true)}
-                  className="flex-1 py-2 px-2 rounded-xl border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-xs font-bold active:scale-98 transition-all"
+                  className="py-2 px-3 rounded-lg border border-rose-300 bg-white text-rose-700 text-xs font-semibold whitespace-nowrap"
                 >
                   Replace All...
                 </button>
                 <button
                   type="button"
                   onClick={() => setPendingRestore(null)}
-                  className="py-2 px-2.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
+                  className="py-2 px-3 rounded-lg border border-slate-200 bg-white text-slate-600 text-xs font-semibold whitespace-nowrap"
                 >
                   Cancel
                 </button>
               </div>
             ) : (
-              <div className="space-y-2 pt-1 border-t border-amber-200">
-                <p className="text-[11px] font-bold text-rose-800">
-                  Type <span className="underline tracking-wider font-mono">RESTORE</span> to overwrite all current data:
+              <div className="space-y-2 pt-2 border-t border-amber-200">
+                <p className="text-xs font-bold text-rose-900">
+                  Type <span className="underline font-mono">RESTORE</span> to replace all stored records:
                 </p>
                 <input
                   type="text"
                   value={confirmReplaceText}
                   onChange={e => setConfirmReplaceText(e.target.value)}
                   placeholder="RESTORE"
-                  className="w-full px-3 py-1.5 text-xs font-mono border border-rose-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-rose-500"
+                  className="w-full px-3 py-2 text-xs font-mono border border-rose-300 rounded-lg bg-white"
                 />
                 <div className="flex gap-2">
                   <button
                     type="button"
                     disabled={loading || confirmReplaceText.trim().toUpperCase() !== 'RESTORE'}
                     onClick={() => handleExecuteRestore('replace')}
-                    className="flex-1 py-2 px-3 rounded-xl bg-rose-600 disabled:bg-slate-300 text-white text-xs font-bold shadow-xs hover:bg-rose-700 transition-all"
+                    className="flex-1 py-2 px-3 rounded-lg bg-rose-600 disabled:bg-slate-300 text-white text-xs font-semibold whitespace-nowrap"
                   >
                     Confirm Replace
                   </button>
@@ -350,7 +404,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                       setShowReplaceConfirm(false);
                       setConfirmReplaceText('');
                     }}
-                    className="py-2 px-3 rounded-xl border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
+                    className="py-2 px-3 rounded-lg border border-slate-200 bg-white text-slate-600 text-xs font-semibold whitespace-nowrap"
                   >
                     Back
                   </button>
@@ -360,57 +414,79 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
           </div>
         )}
 
-        {/* Action 1: Export Full JSON Backup */}
-        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-2.5">
-          <div className="flex items-center justify-between">
+        {/* Section 1: Persistent Local Storage */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <HardDrive size={16} className="text-[#14503F]" />
-              <span className="text-xs font-bold text-slate-900">Full JSON Backup</span>
+              <ShieldCheck size={15} className="text-[#0F4C3A]" />
+              <span className="text-xs font-bold text-slate-900">Device Storage Permission</span>
             </div>
-            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-full">
-              Safe Migration
+            <span className={`text-xs font-semibold whitespace-nowrap ${
+              storageStatus.persisted ? 'text-emerald-700' : 'text-amber-700'
+            }`}>
+              {storageStatus.persisted ? 'Persistent Granted' : 'Standard Browser Storage'}
             </span>
           </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Includes SQLite SMS records, server responses, opening balances, tags, overrides, and settings.
+          <div className="text-xs text-slate-600 flex items-center justify-between gap-2">
+            <span>Usage: {formatMb(storageStatus.usageBytes)} · Quota: {formatMb(storageStatus.quotaBytes)}</span>
+            {storageStatus.supported && !storageStatus.persisted && (
+              <button
+                type="button"
+                onClick={handleRequestPersistence}
+                className="px-2.5 py-1 rounded-md bg-white border border-slate-300 hover:border-[#0F4C3A] text-xs font-semibold text-slate-800 whitespace-nowrap"
+              >
+                Allow Persistent Storage
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Section 2: Export Full Timestamped JSON Backup */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <HardDrive size={15} className="text-[#0F4C3A]" />
+              <span className="text-xs font-bold text-slate-900">Timestamped JSON Backup (v5)</span>
+            </div>
+            <span className="text-xs font-semibold text-emerald-700">Original Places</span>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Saves all messages with exact timestamps, server results, opening balances, tags, overrides, budgets, custom banks, and settings.
           </p>
 
-          {/* Requirement E3: Secret key checkbox off by default */}
-          <label className="flex items-start gap-2 p-2 rounded-xl bg-white border border-slate-200 cursor-pointer select-none">
+          <label className="flex items-start gap-2 p-2.5 rounded-lg bg-white border border-slate-200 cursor-pointer select-none">
             <input
               type="checkbox"
               checked={includeSecretKey}
               onChange={e => setIncludeSecretKey(e.target.checked)}
-              className="mt-0.5 rounded text-[#14503F] focus:ring-[#14503F]"
+              className="mt-0.5 rounded text-[#0F4C3A]"
             />
-            <div className="text-[11px] leading-tight">
-              <span className="font-semibold text-slate-800">
-                Include Secret Key in backup
-              </span>
-              <span className="block text-[10px] text-amber-700 font-medium">
-                (Keep file private! If unchecked, key is left blank)
+            <div className="text-xs leading-tight">
+              <span className="font-semibold text-slate-800">Include Server Secret Key in export</span>
+              <span className="block text-[11px] text-slate-500 mt-0.5">
+                Off by default so exported files stay safe to archive.
               </span>
             </div>
           </label>
 
-          <div className="grid grid-cols-2 gap-2 pt-0.5">
+          <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
               disabled={loading}
               onClick={() => handleExportBackup(false)}
-              className="py-2.5 px-3 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-xs hover:bg-[#0e3b2e] active:scale-98 transition-all flex items-center justify-center gap-1.5"
+              className="py-2.5 px-3 rounded-lg bg-[#0F4C3A] text-white text-xs font-semibold hover:bg-[#0B3B2E] whitespace-nowrap flex items-center justify-center gap-1.5"
             >
               {loading ? <RefreshCw size={13} className="animate-spin" /> : <Download size={13} />}
-              <span>Save (.json)</span>
+              <span>Download (.json)</span>
             </button>
             <button
               type="button"
               disabled={loading}
               onClick={() => handleExportBackup(true)}
-              className="py-2.5 px-3 rounded-xl border border-emerald-600 bg-white hover:bg-emerald-50 text-emerald-800 text-xs font-bold shadow-xs active:scale-98 transition-all flex items-center justify-center gap-1.5"
+              className="py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
             >
               <Share2 size={13} />
-              <span>Share Sheet</span>
+              <span>Share File</span>
             </button>
           </div>
 
@@ -418,26 +494,24 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
             type="button"
             disabled={loading}
             onClick={handleCopyBackupToClipboard}
-            className="w-full text-center text-[10.5px] font-semibold text-slate-500 hover:text-slate-800 flex items-center justify-center gap-1 py-1"
+            className="w-full text-center text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 py-1"
           >
-            <Copy size={11} />
+            <Copy size={12} />
             <span>Copy backup JSON to clipboard</span>
           </button>
         </div>
 
-        {/* Action 2: Install Update & Restore */}
-        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-2">
+        {/* Section 3: Import & Restore to Original Places */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Upload size={16} className="text-[#14503F]" />
-              <span className="text-xs font-bold text-slate-900">Install Update & Merge Backup</span>
+              <Upload size={15} className="text-[#0F4C3A]" />
+              <span className="text-xs font-bold text-slate-900">Import Backup to Original Places</span>
             </div>
-            <span className="text-[9.5px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-              No Data Loss
-            </span>
+            <span className="text-xs font-semibold text-emerald-700">Non-destructive Merge</span>
           </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Select an `ak_finance_backup_*.json` file. All new transactions, accounts, and budgets are installed safely without deleting your existing database.
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Restores every message ID, timestamp, bank, tag, override, budget, and setting back into its original store.
           </p>
           <input
             type="file"
@@ -450,47 +524,67 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
             type="button"
             disabled={loading}
             onClick={() => fileInputRef.current?.click()}
-            className="w-full py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold shadow-xs active:scale-98 transition-all flex items-center justify-center gap-1.5"
+            className="w-full py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
           >
-            <Upload size={13} className="text-[#14503F]" />
-            <span>Select Backup File to Install / Update</span>
+            <Upload size={13} className="text-[#0F4C3A]" />
+            <span>Select Backup JSON File</span>
           </button>
         </div>
 
-        {/* Action 3: CSV Spreadsheet Export */}
-        <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-2">
+        {/* Section 4: CSV Export */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <FileSpreadsheet size={16} className="text-emerald-700" />
-              <span className="text-xs font-bold text-slate-900">CSV Export (UTF-8 BOM)</span>
+              <FileSpreadsheet size={15} className="text-emerald-700" />
+              <span className="text-xs font-bold text-slate-900">CSV Ledger Export (UTF-8 BOM)</span>
             </div>
-            <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-1.5 py-0.5 rounded-full">
-              Excel Ready
-            </span>
+            <span className="text-xs font-semibold text-slate-600">Date & Time Columns</span>
           </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Includes Date, Bank, Direction, Amount, Counterparty, Category, Tag, Note, Ref/FT, Balance, and Server status with UTF-8 BOM for Amharic character support.
-          </p>
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
               disabled={loading}
               onClick={() => handleExportCsv(false)}
-              className="py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold shadow-xs active:scale-98 transition-all flex items-center justify-center gap-1.5"
+              className="py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
             >
               <Download size={13} />
-              <span>Save (.csv)</span>
+              <span>Download (.csv)</span>
             </button>
             <button
               type="button"
               disabled={loading}
               onClick={() => handleExportCsv(true)}
-              className="py-2.5 px-3 rounded-xl border border-emerald-600 bg-white hover:bg-emerald-50 text-emerald-800 text-xs font-bold shadow-xs active:scale-98 transition-all flex items-center justify-center gap-1.5"
+              className="py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
             >
               <Share2 size={13} />
               <span>Share (.csv)</span>
             </button>
           </div>
+        </div>
+
+        {/* Section 5: Sync Local Storage to Server */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CloudUpload size={15} className="text-[#0F4C3A]" />
+              <span className="text-xs font-bold text-slate-900">Sync Local Storage to Server</span>
+            </div>
+            <span className="text-xs font-semibold text-slate-600">
+              {serverUrlConfigured ? 'Webhook Set' : 'Optional'}
+            </span>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Forward locally saved transactions to your server webhook. Records rejected by legacy servers remain preserved locally.
+          </p>
+          <button
+            type="button"
+            disabled={syncLoading}
+            onClick={handleBulkSync}
+            className="w-full py-2.5 px-3 rounded-lg border border-[#0F4C3A] bg-white hover:bg-emerald-50 text-[#0F4C3A] text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
+          >
+            {syncLoading ? <RefreshCw size={13} className="animate-spin" /> : <CloudUpload size={13} />}
+            <span>{syncLoading ? 'Syncing Local Records...' : 'Sync All Local Transactions to Server'}</span>
+          </button>
         </div>
       </div>
     </div>

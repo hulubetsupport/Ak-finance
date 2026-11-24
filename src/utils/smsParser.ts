@@ -13,6 +13,7 @@ export interface ParsedPayment {
   reference: string;
   ftNumber?: string;
   v2Code?: string;
+  receiptUrl?: string;
   accountNumber?: string;
   balance?: number;
   balanceSantim?: number;
@@ -24,18 +25,142 @@ export interface ParsedPayment {
 }
 
 // -------------------------------------------------------------
-// EDITABLE SENDER MAP
+// EDITABLE SENDER MAP (All Major Ethiopian Banks & Wallets)
 // -------------------------------------------------------------
 export const DEFAULT_SENDER_BANK_MAP: Record<string, string> = {
   '127': 'Telebirr',
+  'TELEBIRR': 'Telebirr',
   'CBE': 'CBE',
   'COMMERCIAL BANK OF ETHIOPIA': 'CBE',
+  'CBEBIRR': 'CBE Birr',
+  'CBE_BIRR': 'CBE Birr',
+  'CBE BIRR': 'CBE Birr',
   'AWASHBANK': 'Awash Bank',
   'AWASH': 'Awash Bank',
   'DASHEN': 'Dashen Bank',
+  'DASHENBANK': 'Dashen Bank',
   'BOA': 'Bank of Abyssinia',
   'ABYSSINIA': 'Bank of Abyssinia',
+  'ZEMEN': 'Zemen Bank',
+  'ZEMENBANK': 'Zemen Bank',
+  'SIINQEE': 'Siinqee Bank',
+  'SINQEE': 'Siinqee Bank',
+  'SIINQEEBANK': 'Siinqee Bank',
+  'EBIRR': 'eBirr',
+  'ZAMZAM': 'ZamZam Bank',
+  'ZAMZAMBANK': 'ZamZam Bank',
+  'BUNNA': 'Bunna Bank',
+  'BUNNABANK': 'Bunna Bank',
+  'WEGAGEN': 'Wegagen Bank',
+  'WEGAGENBANK': 'Wegagen Bank',
+  'M-PESA': 'M-Pesa',
+  'MPESA': 'M-Pesa',
+  'ABAYBANK': 'Abay Bank',
+  'ABAY': 'Abay Bank',
+  'NIBBANK': 'Nib Bank',
+  'NIB': 'Nib Bank',
+  'HIBRET': 'Hibret Bank',
+  'HIBRETBANK': 'Hibret Bank',
+  'UNITEDBANK': 'Hibret Bank',
+  'COOPBANK': 'Coop Bank',
+  'COOP': 'Coop Bank',
+  'TSEDEY': 'Tsedey Bank',
+  'ADDISBANK': 'Addis Bank',
+  'AMHARABANK': 'Amhara Bank',
+  'BERHAN': 'Berhan Bank',
+  'BERHANBANK': 'Berhan Bank',
+  'ENAT': 'Enat Bank',
+  'ENATBANK': 'Enat Bank',
 };
+
+// -------------------------------------------------------------
+// HELPER: CBE-ONLY FT RULE
+// -------------------------------------------------------------
+export function isCbeBank(bank: string): boolean {
+  const b = (bank || '').trim().toUpperCase();
+  return b === 'CBE' || b === 'COMMERCIAL BANK OF ETHIOPIA';
+}
+
+/**
+ * Only CBE bank transfers rely on FT / v2 receipt codes for verification.
+ * Telebirr, Awash, BOA, Dashen, Zemen, Siinqee, Wegagen, M-Pesa, etc. resolve on their own.
+ */
+export function needsFtRecovery(payment: {
+  bank: string;
+  category?: string;
+  ftNumber?: string;
+  v2Code?: string;
+  reference?: string;
+}): boolean {
+  if (!isCbeBank(payment.bank)) return false;
+  if (payment.category === 'alert' || payment.category === 'atm-card') return false;
+  if (payment.v2Code && /^v2-/i.test(payment.v2Code.trim())) return false;
+  if (payment.ftNumber && /^FT[A-Z0-9]{6,}$/i.test(payment.ftNumber.trim())) return false;
+  const ref = (payment.reference || '').trim();
+  if (/^(?:FT[A-Z0-9]{6,}|v2-[A-Za-z0-9_-]+)$/i.test(ref)) {
+    return false;
+  }
+  return true;
+}
+
+// -------------------------------------------------------------
+// HELPER: BUILD OFFICIAL RECEIPT URL
+// -------------------------------------------------------------
+export function buildOfficialReceiptUrl(
+  bank: string,
+  reference: string,
+  accountNumber?: string,
+  extractedUrl?: string
+): string | undefined {
+  if (extractedUrl && /^https?:\/\//i.test(extractedUrl)) {
+    return extractedUrl.replace(/[.,;)\]]+$/, '');
+  }
+  const ref = (reference || '').trim();
+  if (!ref || ref.startsWith('SMS-')) return undefined;
+
+  const b = (bank || '').toLowerCase();
+  if (b.includes('telebirr') || b === '127') {
+    return `https://transactioninfo.ethiotelecom.et/receipt/${encodeURIComponent(ref)}`;
+  }
+  if (isCbeBank(bank)) {
+    if (ref.startsWith('v2-')) {
+      return `https://mbreciept.cbe.com.et/${encodeURIComponent(ref)}`;
+    }
+    const cleanAcc = (accountNumber || '').replace(/\D/g, '');
+    if (cleanAcc.length >= 8) {
+      return `https://apps.cbe.com.et:100/?id=${encodeURIComponent(ref.toUpperCase() + cleanAcc.slice(-8))}`;
+    }
+    return `https://apps.cbe.com.et:100/?id=${encodeURIComponent(ref.toUpperCase())}`;
+  }
+  if (b.includes('abyssinia') || b === 'boa') {
+    return `https://cs.bankofabyssinia.com/slip/?trx=${encodeURIComponent(ref.toUpperCase())}`;
+  }
+  if (b.includes('dashen')) {
+    return `https://receipts.dashenbanksc.com/receipt/${encodeURIComponent(ref.toUpperCase())}`;
+  }
+  if (b.includes('zemen')) {
+    return `https://share.zemenbank.com/rt/${encodeURIComponent(ref)}/pdf`;
+  }
+  if (b.includes('siinqee') || b.includes('sinqee')) {
+    return `https://receipts.siinqeebank.com:871/generate/${encodeURIComponent(ref)}`;
+  }
+  if (b.includes('zamzam')) {
+    return `https://receipt.zamzambank.com.et/receipt/${encodeURIComponent(ref)}`;
+  }
+  if (b.includes('cbe birr') || b.includes('cbebirr')) {
+    return `https://cbepay1.cbe.com.et/aureceipt?TID=${encodeURIComponent(ref.toUpperCase())}`;
+  }
+  if (b.includes('wegagen')) {
+    return `https://transinfo.wegagenbanksc.com.et:8183/?id=${encodeURIComponent(ref)}`;
+  }
+  if (b.includes('bunna')) {
+    return `https://online.bunnabanksc.com/receipt/#/${encodeURIComponent(ref)}`;
+  }
+  if (b.includes('m-pesa') || b.includes('mpesa')) {
+    return `https://m-pesabusiness.safaricom.et/api/receipt/getReceipt?trxNo=${encodeURIComponent(ref.toUpperCase())}`;
+  }
+  return undefined;
+}
 
 // -------------------------------------------------------------
 // GE'EZ / AMHARIC NUMERAL CONVERTER (፩ to ፼)
@@ -70,48 +195,94 @@ export function convertAmharicNumerals(text: string): string {
 }
 
 // -------------------------------------------------------------
-// BANK DETECTION (Sender Decides First)
+// BANK DETECTION (Sender First -> URL Domain -> Body Text)
 // -------------------------------------------------------------
 export function determineBank(sender: string, message: string, customMap?: Record<string, string>): string {
   const normSender = (sender || '').trim().toUpperCase();
   const map = { ...DEFAULT_SENDER_BANK_MAP, ...(customMap || {}) };
 
-  // 1. SENDER FIRST: Check exact sender match
+  // 1. Exact sender match
   for (const [key, val] of Object.entries(map)) {
     if (key.trim().toUpperCase() === normSender) {
       return val;
     }
   }
 
-  // Also check if sender contains key (e.g. "CBE-SMS" or "Telebirr")
+  // 2. Partial sender match
   for (const [key, val] of Object.entries(map)) {
-    if (normSender.includes(key.trim().toUpperCase())) {
+    const kUpper = key.trim().toUpperCase();
+    if (kUpper.length >= 2 && normSender.includes(kUpper)) {
       return val;
     }
   }
 
-  // 2. If sender is unknown, guess from the text
+  // 3. Receipt URL / Body text match
   const lowerMsg = (message || '').toLowerCase();
-  if (lowerMsg.includes('telebirr') || lowerMsg.includes('ቴሌብር') || lowerMsg.includes('ethio telecom')) {
+  if (lowerMsg.includes('cbepay1.cbe.com.et') || lowerMsg.includes('cbe birr') || lowerMsg.includes('cbebirr')) {
+    return 'CBE Birr';
+  }
+  if (lowerMsg.includes('ethiotelecom.et') || lowerMsg.includes('telebirr') || lowerMsg.includes('ቴሌብር') || lowerMsg.includes('ethio telecom')) {
     return 'Telebirr';
   }
-  if (lowerMsg.includes('cbe') || lowerMsg.includes('commercial bank of ethiopia') || lowerMsg.includes('የኢትዮጵያ ንግድ ባንክ')) {
+  if (lowerMsg.includes('mbreciept.cbe.com.et') || lowerMsg.includes('apps.cbe.com.et') || lowerMsg.includes('commercial bank of ethiopia') || /\bcbe\b/.test(lowerMsg) || lowerMsg.includes('የኢትዮጵያ ንግድ ባንክ')) {
     return 'CBE';
   }
-  if (lowerMsg.includes('awash') || lowerMsg.includes('አዋሽ')) {
+  if (lowerMsg.includes('awashpay.awashbank.com') || lowerMsg.includes('awash bank') || lowerMsg.includes('awash international') || lowerMsg.includes('አዋሽ')) {
     return 'Awash Bank';
   }
-  if (lowerMsg.includes('dashen') || lowerMsg.includes('ዳሽን')) {
+  if (lowerMsg.includes('dashenbanksc.com') || lowerMsg.includes('dashensuperapp.com') || lowerMsg.includes('dashen') || lowerMsg.includes('ዳሽን')) {
     return 'Dashen Bank';
   }
-  if (lowerMsg.includes('abyssinia') || lowerMsg.includes('boa') || lowerMsg.includes('አቢሲኒያ')) {
+  if (lowerMsg.includes('bankofabyssinia.com') || lowerMsg.includes('abyssinia') || /\bboa\b/.test(lowerMsg) || lowerMsg.includes('አቢሲኒያ')) {
     return 'Bank of Abyssinia';
   }
-  if (lowerMsg.includes('abay') || lowerMsg.includes('ዓባይ') || lowerMsg.includes('አባይ')) {
+  if (lowerMsg.includes('zemenbank.com') || lowerMsg.includes('zemen') || lowerMsg.includes('ዘመን')) {
+    return 'Zemen Bank';
+  }
+  if (lowerMsg.includes('siinqeebank.com') || lowerMsg.includes('siinqee') || lowerMsg.includes('sinqee') || lowerMsg.includes('ሲንቄ')) {
+    return 'Siinqee Bank';
+  }
+  if (lowerMsg.includes('ebirr.com') || lowerMsg.includes('ebirr')) {
+    return 'eBirr';
+  }
+  if (lowerMsg.includes('zamzambank.com') || lowerMsg.includes('zamzam') || lowerMsg.includes('ዘምዘም')) {
+    return 'ZamZam Bank';
+  }
+  if (lowerMsg.includes('bunnabanksc.com') || lowerMsg.includes('bunna') || lowerMsg.includes('ቡና ባንክ')) {
+    return 'Bunna Bank';
+  }
+  if (lowerMsg.includes('wegagenbanksc.com') || lowerMsg.includes('wegagen') || lowerMsg.includes('ወጋገን')) {
+    return 'Wegagen Bank';
+  }
+  if (lowerMsg.includes('safaricom.et') || lowerMsg.includes('m-pesa') || lowerMsg.includes('mpesa')) {
+    return 'M-Pesa';
+  }
+  if (lowerMsg.includes('coopbank') || lowerMsg.includes('cooperative bank of oromia')) {
+    return 'Coop Bank';
+  }
+  if (lowerMsg.includes('abay bank') || lowerMsg.includes('abaybank') || lowerMsg.includes('ዓባይ') || lowerMsg.includes('አባይ')) {
     return 'Abay Bank';
   }
-  if (lowerMsg.includes('wegagen') || lowerMsg.includes('ወጋገን')) {
-    return 'Wegagen Bank';
+  if (lowerMsg.includes('nib bank') || lowerMsg.includes('nib international') || lowerMsg.includes('ንብ')) {
+    return 'Nib Bank';
+  }
+  if (lowerMsg.includes('hibret') || lowerMsg.includes('united bank') || lowerMsg.includes('ህብረት')) {
+    return 'Hibret Bank';
+  }
+  if (lowerMsg.includes('tsedey') || lowerMsg.includes('ፀደይ')) {
+    return 'Tsedey Bank';
+  }
+  if (lowerMsg.includes('addis international') || lowerMsg.includes('addis bank')) {
+    return 'Addis Bank';
+  }
+  if (lowerMsg.includes('amhara bank') || lowerMsg.includes('አማራ ባንክ')) {
+    return 'Amhara Bank';
+  }
+  if (lowerMsg.includes('berhan bank') || lowerMsg.includes('ብርሃን ባንክ')) {
+    return 'Berhan Bank';
+  }
+  if (lowerMsg.includes('enat bank') || lowerMsg.includes('እናት ባንክ')) {
+    return 'Enat Bank';
   }
 
   return 'Unknown';
@@ -132,6 +303,10 @@ export const CBE_OUTGOING_PHRASES: readonly string[] = [
   'transferred to',
   'sent to',
   'paid to',
+  'request to withdraw',
+  'withdrawn from',
+  'withdrew',
+  'withdraw etb',
   'ወጪ',
   'ተላልፏል',
   'አስተላልፈዋል',
@@ -149,6 +324,7 @@ export const CBE_INCOMING_PHRASES: readonly string[] = [
   'deposited by',
   'deposited',
   'received from',
+  'received a payment',
   'ገቢ',
   'ተላልፎልዎታል',
   'ተላልፎልዎታ',
@@ -161,8 +337,11 @@ export const TELEBIRR_OUTGOING_PHRASES: readonly string[] = [
   'አስተላልፈዋል',
   'ገዝተዋል',
   'ወጪ',
+  'አውጥተዋል',
   'you have transferred',
   'you have paid',
+  'you have withdrawn',
+  'request to withdraw',
 ];
 
 export const TELEBIRR_INCOMING_PHRASES: readonly string[] = [
@@ -175,15 +354,14 @@ export const TELEBIRR_INCOMING_PHRASES: readonly string[] = [
 export function determineDirection(cleanMsg: string): PaymentType {
   const lowerMsg = cleanMsg.toLowerCase();
 
-  // Outgoing phrases
   const allOutgoing = [
     ...CBE_OUTGOING_PHRASES,
     ...TELEBIRR_OUTGOING_PHRASES,
     'withdrawn',
     'sent',
+    'cash out',
   ];
 
-  // Incoming phrases
   const allIncoming = [
     ...CBE_INCOMING_PHRASES,
     ...TELEBIRR_INCOMING_PHRASES,
@@ -193,32 +371,25 @@ export function determineDirection(cleanMsg: string): PaymentType {
   let earliestOutgoingIndex = -1;
   for (const phrase of allOutgoing) {
     const idx = lowerMsg.indexOf(phrase.toLowerCase());
-    if (idx !== -1) {
-      if (earliestOutgoingIndex === -1 || idx < earliestOutgoingIndex) {
-        earliestOutgoingIndex = idx;
-      }
+    if (idx !== -1 && (earliestOutgoingIndex === -1 || idx < earliestOutgoingIndex)) {
+      earliestOutgoingIndex = idx;
     }
   }
 
   let earliestIncomingIndex = -1;
   for (const phrase of allIncoming) {
     const idx = lowerMsg.indexOf(phrase.toLowerCase());
-    if (idx !== -1) {
-      if (earliestIncomingIndex === -1 || idx < earliestIncomingIndex) {
-        earliestIncomingIndex = idx;
-      }
+    if (idx !== -1 && (earliestIncomingIndex === -1 || idx < earliestIncomingIndex)) {
+      earliestIncomingIndex = idx;
     }
   }
 
-  // If both appear the first one wins
   if (earliestOutgoingIndex !== -1 && earliestIncomingIndex !== -1) {
     return earliestOutgoingIndex <= earliestIncomingIndex ? 'sent' : 'received';
   }
-
   if (earliestOutgoingIndex !== -1) return 'sent';
   if (earliestIncomingIndex !== -1) return 'received';
 
-  // Never default to Received; show "unknown"
   return 'unknown';
 }
 
@@ -228,54 +399,123 @@ export function determineDirection(cleanMsg: string): PaymentType {
 export function parseBankSms(sender: string, message: string, customMap?: Record<string, string>): ParsedPayment {
   const originalMsg = (message || '').trim();
   const cleanMsg = convertAmharicNumerals(originalMsg);
-  const lowerMsg = cleanMsg.toLowerCase();
 
   const bank = determineBank(sender, cleanMsg, customMap);
+
+  // 0. DETECT PRE-EXECUTION ATM SECRET CODE NOTICE (e.g. "Your ATM withdrawal secret code is 215822 for an amount of ETB 100.00. Please use this code before ...")
+  // This is an authorization OTP notice, NOT an actual ledger movement!
+  const isAtmSecretCodeNotice =
+    /atm\s*withdrawal\s*secret\s*code\s*is\s*\d+/i.test(cleanMsg) &&
+    !/successfully\s*completed|transaction\s*number|receipt\//i.test(cleanMsg);
+
+  if (isAtmSecretCodeNotice) {
+    const codeMatch = cleanMsg.match(/secret\s*code\s*is\s*(\d{4,8})/i);
+    const amtMatch = cleanMsg.match(/(?:amount\s*of\s*)?(?:ETB|Birr|ብር)\s*([0-9,]+(?:\.[0-9]+)?)/i);
+    const code = codeMatch?.[1] || '';
+    const reservedAmt = amtMatch?.[1] || '';
+    const labelParts = ['ATM Secret Code'];
+    if (code) labelParts.push(code);
+    if (reservedAmt) labelParts.push(`ETB ${reservedAmt}`);
+
+    let dateStr = new Date().toISOString();
+    let timestamp = Date.now();
+    const dtMatch = cleanMsg.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/);
+    if (dtMatch?.[1]) {
+      const ts = Date.parse(dtMatch[1].replace(/-/g, '/'));
+      if (!isNaN(ts)) {
+        timestamp = ts;
+        dateStr = new Date(ts).toISOString();
+      }
+    }
+
+    return {
+      bank,
+      senderAddress: sender,
+      type: 'unknown',
+      category: 'alert',
+      amount: 0,
+      amountCents: 0,
+      amountSantim: 0,
+      currency: 'ETB',
+      counterparty: labelParts.join(' · '),
+      reference: code ? `OTP-${code}` : '',
+      date: dateStr,
+      timestamp,
+      rawMessage: originalMsg,
+    };
+  }
+
   let type = determineDirection(cleanMsg);
 
-  // 1. EXTRACT V2 CODE AND FT NUMBER
-  // CBE v2 link: https://mbreciept.cbe.com.et/v2-xxxx or /v2-xxxx (case-sensitive, NEVER uppercase)
+  // 1. EXTRACT RECEIPT URL, V2 CODE, FT NUMBER & MULTI-BANK REFERENCES
+  let extractedUrl: string | undefined = undefined;
+  const urlMatch = originalMsg.match(/https?:\/\/[^\s"'<>]+/i);
+  if (urlMatch && urlMatch[0]) {
+    extractedUrl = urlMatch[0].replace(/[.,;)\]]+$/, '');
+  }
+
+  // CBE v2 link: https://mbreciept.cbe.com.et/v2-xxxx (case-sensitive)
   let v2Code: string | undefined = undefined;
   const v2Match = originalMsg.match(/\b(v2-[A-Za-z0-9_-]+)/);
   if (v2Match && v2Match[1]) {
     v2Code = v2Match[1].trim();
   }
 
-  // FT Number: e.g. /BranchReceipt/FT26294BDL5T&6233 or FT...
+  // FT Number (CBE, Dashen, Awash): e.g. FT26294BDL5T
   let ftNumber: string | undefined = undefined;
-  const ftMatch = originalMsg.match(/\b(FT[A-Za-z0-9]{8,15})\b/i);
+  const ftMatch = originalMsg.match(/\b(FT[A-Za-z0-9]{8,16})\b/i);
   if (ftMatch && ftMatch[1]) {
     ftNumber = ftMatch[1].toUpperCase().trim();
   }
 
-  // Reference for Telebirr or general (10-character code after transaction number / የግብይት ቁጥርዎ)
   let reference = '';
   if (v2Code) {
     reference = v2Code;
   } else if (ftNumber) {
     reference = ftNumber;
-  } else {
-    const telebirrRefMatch =
-      cleanMsg.match(/(?:የግብይት\s*ቁጥርዎ?|የሂሳብ\s*እንቅስቃሴ\s*ቁጥርዎ?|transaction\s*(?:number|id|no\.?)|txn\s*id)\s*(?:is|ነው|ነዉ)?\s*:?\s*([A-Za-z0-9]{8,15})/i) ||
-      cleanMsg.match(/(?:receipt\/)([A-Za-z0-9]{8,15})/i);
-    if (telebirrRefMatch && telebirrRefMatch[1]) {
-      reference = telebirrRefMatch[1].trim();
+  } else if (extractedUrl) {
+    // Bank-specific URL parameter extraction (from cheki & ethiobank-receipts)
+    const idParam = extractedUrl.match(/[?&]id=([A-Za-z0-9_-]+)/i);
+    const tidParam = extractedUrl.match(/[?&]TID=([A-Za-z0-9_-]+)/i);
+    const trxParam = extractedUrl.match(/[?&]trx=([A-Za-z0-9_-]+)/i);
+    const zemenMatch = extractedUrl.match(/\/rt\/([A-Za-z0-9_-]+)/i);
+    const awashToken = extractedUrl.match(/awashbank\.com:\d+\/-?([A-Za-z0-9_-]+)/i);
+    const bunnaToken = extractedUrl.match(/receipt\/#\/([^?\s]+)/i);
+    const pathTail = extractedUrl.match(/\/(?:receipt|generate|slip)\/([A-Za-z0-9_-]{5,32})/i);
+
+    if (idParam?.[1]) reference = idParam[1].trim();
+    else if (tidParam?.[1]) reference = tidParam[1].trim();
+    else if (trxParam?.[1]) reference = trxParam[1].trim();
+    else if (zemenMatch?.[1]) reference = zemenMatch[1].trim();
+    else if (awashToken?.[1]) reference = awashToken[1].trim();
+    else if (bunnaToken?.[1]) reference = bunnaToken[1].trim();
+    else if (pathTail?.[1]) reference = pathTail[1].trim();
+  }
+
+  if (!reference) {
+    const genRefMatch =
+      cleanMsg.match(/(?:የግብይት\s*ቁጥርዎ?|የሂሳብ\s*እንቅስቃሴ\s*ቁጥርዎ?|transaction\s*(?:number|id|no\.?|ref)|txn\s*(?:id|no\.?)|receipt\s*(?:number|no\.?)|trx\s*no\.?)\s*(?:is|ነው|ነዉ)?\s*[:#]?\s*([A-Za-z0-9-]{6,20})/i) ||
+      cleanMsg.match(/\bRef(?:\s*No\.?)?\s*[:#]\s*([A-Za-z0-9-]{6,24})/i);
+    if (genRefMatch && genRefMatch[1]) {
+      reference = genRefMatch[1].trim();
     }
   }
 
   // 2. CATEGORY DETECTION
-  // Airtime (አየር ሰዓት, airtime, recharge)
-  // Data (ኢንተርኔት, ዳታ, ጥቅል, package, bundle)
-  // Payment (ከፍለዋል, paid)
-  // ATM-Card (CBE "has been debited with ETB x including Service charge" with no receipt link and no "to account")
   let category: PaymentCategory = 'other';
+
+  const isCompletedAtmWithdrawal =
+    /(?:request\s*to\s*withdraw|withdrawn|cash\s*withdrawal|using\s+.*\batm\b)/i.test(cleanMsg) &&
+    (/(?:successfully\s*completed|transaction\s*number|receipt\/|service\s*fee|balance)/i.test(cleanMsg) || /\batm\b/i.test(cleanMsg));
 
   const isAirtime = /አየር\s*ሰዓት|የአየር\s*ሰዓት|airtime|recharge|top\s*up/i.test(cleanMsg);
   const isData = /ኢንተርኔት|ዳታ|ጥቅል|package|bundle|internet/i.test(cleanMsg);
+  const isBill = /\bbill\b|electric|water\s*bill|utility|መብራት|ውሃ/i.test(cleanMsg);
   const isPayment = /ከፍለዋል|\bpaid\b|\bmerchant\b|ለነጋዴ/i.test(cleanMsg);
   const isAlertMsg =
-    /logged\s*in|login|log\s*in|otp|one\s*time\s*password|verification\s*code|security\s*alert|password\s*(?:changed|reset)|daily\s*limit|limit\s*has\s*been|statement\s*request|session\s*expired|announcement|fraud\s*alert|alert\s*:|notice\s*:/i.test(cleanMsg) ||
-    /የይለፍ\s*ቃል|ማረጋገጫ\s*ኮድ|ማስጠንቀቂያ|የደህንነት|የመግቢያ/i.test(cleanMsg);
+    !isCompletedAtmWithdrawal &&
+    (/logged\s*in|login|log\s*in|\botp\b|one\s*time\s*password|verification\s*code|security\s*alert|password\s*(?:changed|reset)|daily\s*limit|limit\s*has\s*been|statement\s*request|session\s*expired|announcement|fraud\s*alert|alert\s*:|notice\s*:/i.test(cleanMsg) ||
+      /የይለፍ\s*ቃል|ማረጋገጫ\s*ኮድ|ማስጠንቀቂያ|የደህንነት|የመግቢያ/i.test(cleanMsg));
 
   const isCbeAtmCard =
     bank === 'CBE' &&
@@ -285,7 +525,7 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     !ftNumber &&
     !/to\s*account/i.test(cleanMsg);
 
-  if (isCbeAtmCard) {
+  if (isCompletedAtmWithdrawal || isCbeAtmCard) {
     category = 'atm-card';
     type = 'sent';
   } else if (isAirtime) {
@@ -293,6 +533,9 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     type = 'sent';
   } else if (isData) {
     category = 'data';
+    type = 'sent';
+  } else if (isBill) {
+    category = 'bill';
     type = 'sent';
   } else if (isPayment) {
     category = 'payment';
@@ -303,16 +546,12 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     category = 'transfer';
   }
 
-  // 3. EXTRACT MAIN AMOUNT ONLY
-  // Ignore balance, service charge, VAT and total!
-  // Handle ETB/Birr/ብር, commas, decimals, also "ETB10000.00" with no space.
+  // 3. EXTRACT MAIN AMOUNT ONLY (Ignore balance, service charge, fee, VAT and total)
   let amount = 0;
 
-  // Primary Action Amount Regexes (matches right after primary action word)
-  // E.g. "received ETB 10,000.00", "transferred ETB10000.00", "debited with ETB 201.15", "debit transaction of ETB 5980.0.", "credited with ETB 300.00"
   const actionAmountMatch =
-    cleanMsg.match(/(?:received|transferred|debited\s*with|credited\s*with|debit\s*transaction\s*of|credit\s*transaction\s*of|paid)\s*(?:ETB|Birr|ብር)?\s*([0-9,]+(?:\.[0-9]+)?\.?)/i) ||
-    cleanMsg.match(/(?:received|transferred|debited|credited|paid)\s*ETB([0-9,]+(?:\.[0-9]+)?\.?)/i);
+    cleanMsg.match(/(?:received|transferred|debited\s*with|credited\s*with|debit\s*transaction\s*of|credit\s*transaction\s*of|deposited|withdrawn|withdraw|paid|sent)\s*(?:of|with|amount\s*of)?\s*(?:ETB|Birr|ብር)?\s*[-+]?\s*([0-9,]+(?:\.[0-9]+)?\.?)/i) ||
+    cleanMsg.match(/(?:received|transferred|debited|credited|deposited|withdrawn|withdraw|paid)\s*ETB\s*[-+]?\s*([0-9,]+(?:\.[0-9]+)?\.?)/i);
 
   if (actionAmountMatch && actionAmountMatch[1]) {
     const rawNumStr = actionAmountMatch[1].replace(/,/g, '').replace(/\.+$/, '');
@@ -322,11 +561,10 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
-  // Telebirr Amharic Amount Regexes:
-  // E.g. "50.00 ብር ... ተቀብለዋል", "500.00 ብር ከፍለዋል።", "የ 25.00 ብር የአየር ሰዓት"
+  // Telebirr Amharic Amount Regexes
   if (amount === 0) {
     const telebirrAmountMatch =
-      cleanMsg.match(/([0-9,]+(?:\.[0-9]+)?)\s*ብር\s*(?:በ\s*\d|\s*ተቀብለዋል|ከፍለዋል|ልከዋል|አስተላልፈዋል|ገዝተዋል)/) ||
+      cleanMsg.match(/([0-9,]+(?:\.[0-9]+)?)\s*ብር\s*(?:በ\s*\d|\s*ተቀብለዋል|ከፍለዋል|ልከዋል|አስተላልፈዋል|ገዝተዋል|አውጥተዋል)/) ||
       cleanMsg.match(/(?:የ\s*)?([0-9,]+(?:\.[0-9]+)?)\s*ብር\s*(?:የአየር|አየር|ጥቅል|ኢንተርኔት|ዳታ)/) ||
       cleanMsg.match(/(?:ለመግዛት\s*)?([0-9,]+(?:\.[0-9]+)?)\s*ብር\s*(?:ከፍለዋል|ተቀብለዋል|ልከዋል)/);
 
@@ -339,11 +577,14 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
-  // Fallback: general ETB/Birr/ብር match, avoiding words like "total of", "service charge", "vat", "balance"
+  // Fallback general ETB/Birr/ብር match (strip balance/fee clauses first so we don't grab balance!)
   if (amount === 0) {
+    const scrubbedForMainAmt = cleanMsg
+      .replace(/(?:current|available|your)\s*(?:account\s*)?balance[^.;\n]*/gi, '')
+      .replace(/(?:service\s*fee|service\s*charge|vat)[^.;\n]*/gi, '');
     const generalMatch =
-      cleanMsg.match(/(?:ETB|Birr|ብር)\s*([0-9,]+(?:\.[0-9]+)?)/i) ||
-      cleanMsg.match(/([0-9,]+(?:\.[0-9]+)?)\s*(?:ETB|Birr|ብር)/i);
+      scrubbedForMainAmt.match(/(?:ETB|Birr|ብር)\s*([0-9,]+(?:\.[0-9]+)?)/i) ||
+      scrubbedForMainAmt.match(/([0-9,]+(?:\.[0-9]+)?)\s*(?:ETB|Birr|ብር)/i);
 
     if (generalMatch && generalMatch[1]) {
       const rawNumStr = generalMatch[1].replace(/,/g, '').replace(/\.+$/, '');
@@ -354,8 +595,8 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
   }
 
-  // If amount is 0 and it's an alert or has no financial debit/credit words, mark as 'alert'
-  if (amount === 0 && (isAlertMsg || (type === 'unknown' && !actionAmountMatch))) {
+  // Mark pure alerts cleanly
+  if (isAlertMsg || (amount === 0 && type === 'unknown')) {
     category = 'alert';
     type = 'unknown';
   }
@@ -363,10 +604,23 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
   const amountCents = Math.round(amount * 100);
   const amountSantim = amountCents;
 
-  // 4. EXTRACT BALANCE AFTER ("current balance" / "ቀሪ ሂሳብ")
+  // 3b. EXTRACT SERVICE FEE
+  let fee: number | undefined = undefined;
+  const feeMatch = cleanMsg.match(
+    /(?:service\s*fee(?:\s*\([^)]*\))?|service\s*charge(?:\s*of)?|charge\s*of|fee\s*is)\s*(?:is|of)?\s*(?:ETB|Birr|ብር)\s*([0-9,]+(?:\.[0-9]+)?)/i
+  );
+  if (feeMatch && feeMatch[1]) {
+    const f = parseFloat(feeMatch[1].replace(/,/g, '').replace(/\.+$/, ''));
+    if (!isNaN(f) && f > 0) {
+      fee = f;
+    }
+  }
+  const feeCents = fee !== undefined ? Math.round(fee * 100) : undefined;
+
+  // 4. EXTRACT BALANCE AFTER ("current balance" / "balance now is" / "Available balance" / "ቀሪ ሂሳብ")
   let balance: number | undefined = undefined;
   const balanceMatch =
-    cleanMsg.match(/(?:current\s*balance\s*(?:is)?|your\s*balance\s*(?:is)?|ቀሪ\s*ሂሳብ\s*(?:ነው|ዎ|ነዉ)?|አሁን\s*ያለዎት\s*ቀሪ\s*ሂሳብ|ያለዎት\s*ቀሪ\s*ሂሳብ)\s*(?:is|:|ነው|ነዉ)?\s*(?:ETB|Birr|ብር)?\s*([0-9,]+(?:\.[0-9]+)?)/i) ||
+    cleanMsg.match(/(?:current\s*(?:account\s*)?balance\s*(?:is)?|your\s*(?:current\s*)?(?:account\s*)?balance\s*(?:now\s*is|is)?|balance\s+now\s+is|available\s*balance\s*(?:is)?|balance\s*is|ቀሪ\s*ሂሳብ\s*(?:ነው|ዎ|ነዉ)?|አሁን\s*ያለዎት\s*ቀሪ\s*ሂሳብ|ያለዎት\s*ቀሪ\s*ሂሳብ)\s*(?:is|:|ነው|ነዉ)?\s*(?:ETB|Birr|ብር)?\s*([0-9,]+(?:\.[0-9]+)?)/i) ||
     cleanMsg.match(/([0-9,]+(?:\.[0-9]+)?)\s*(?:ETB|Birr|ብር)\s*(?:ቀሪ\s*ሂሳብ|ቀሪ)/i);
 
   if (balanceMatch && balanceMatch[1]) {
@@ -379,13 +633,23 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
   const balanceSantim = balance !== undefined ? Math.round(balance * 100) : undefined;
 
   // 5. EXTRACT COUNTERPARTY NAME
-  // CBE rule: first parenthesis that has letters and no "%", OR "by <Name> with txn id", OR "from <Name>"
-  // Telebirr received: text between "ከ" and "("
-  // Telebirr sent/paid: the word after "ለ"
   let counterparty = '';
 
-  if (bank === 'CBE') {
-    // Rule A: Parentheses check (first parenthesis with letters, no %, not system tokens)
+  // Priority ATM Terminal Extraction (e.g. "using Awash International Bank S C ATM with transaction number ...")
+  if (category === 'atm-card') {
+    const atmUsingMatch = cleanMsg.match(/\busing\s+([A-Za-z0-9\u1200-\u137F\s.&'-]{3,60}?\bATM\b)/i);
+    if (atmUsingMatch && atmUsingMatch[1]) {
+      counterparty = atmUsingMatch[1].trim();
+    } else if (/atm/i.test(cleanMsg)) {
+      const atmAtMatch = cleanMsg.match(/\bat\s+([A-Za-z0-9\s.&'-]{3,50}?\bATM\b)/i);
+      if (atmAtMatch?.[1]) {
+        counterparty = atmAtMatch[1].trim();
+      }
+    }
+  }
+
+  if (!counterparty && isCbeBank(bank)) {
+    // Rule A: Parentheses check
     const matches = cleanMsg.matchAll(/\(([^)]+)\)/g);
     for (const m of matches) {
       const inside = m[1].trim();
@@ -393,14 +657,14 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
         /[A-Za-z\u1200-\u137F]/.test(inside) &&
         !inside.includes('%') &&
         !/^[0-9+*#\s-]+$/.test(inside) &&
-        !/^(?:vat|service\s*charge|cbe|ft|cbs|shorturl|http|charge)/i.test(inside)
+        !/^(?:vat|service\s*charge|cbe|ft|cbs|shorturl|http|charge|including)/i.test(inside)
       ) {
         counterparty = inside;
         break;
       }
     }
 
-    // Rule B1: Amharic "በ <NAME> በኩል" (very common in CBE Amharic messages)
+    // Rule B1: Amharic "በ <NAME> በኩል"
     if (!counterparty) {
       const amharicBekulMatch = cleanMsg.match(/በ\s+([A-Za-z\u1200-\u137F\s]{2,40}?)\s+በኩል/);
       if (amharicBekulMatch && amharicBekulMatch[1]) {
@@ -412,7 +676,6 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     }
 
     // Rule B2: "by <NAME> [with/on/ref/txn/ft/.]"
-    // Handles: "by MERON TESHOME with txn id FT...", "by MERON TESHOME Ref: FT...", "by MERON TESHOME. Ref..."
     if (!counterparty) {
       const byMatch = cleanMsg.match(/\bby\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with\s+)?(?:txn|tx|ref|id|ft|ft\d|\/branchreceipt)|\s+on\s+\d|\.|$|,|;|(?:\s+(?:available|current|your|balance|ቀሪ)))/i);
       if (byMatch && byMatch[1]) {
@@ -428,7 +691,7 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
       }
     }
 
-    // Rule C: "deposited by <NAME>" or "credited by <NAME>" or "received from <NAME>"
+    // Rule C: "deposited by / credited by / received from <NAME>"
     if (!counterparty) {
       const depMatch = cleanMsg.match(/(?:deposited\s+by|credited\s+by|received\s+from)\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft)|\.|$|,|;)/i);
       if (depMatch && depMatch[1]) {
@@ -439,15 +702,15 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
       }
     }
 
-    // Rule D: Explicit Key-Value labels (Sender: <NAME>, Payer: <NAME>, Depositor: <NAME>, ላኪ: <NAME>)
+    // Rule D: Explicit Key-Value labels
     if (!counterparty) {
       const labelMatch = cleanMsg.match(/(?:sender|payer|depositor|from\s*[:፡\-]|ላኪ|የላኪ\s*ስም)\s*[:፡\-]?\s*([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft|account|a\/c)|\.|$|,|;|\n)/i);
       if (labelMatch && labelMatch[1]) {
         const cand = labelMatch[1].trim();
         if (
-          !cand.includes('%') && 
-          !/^(?:your|my|our|account|cbe|customer|dear|service)/i.test(cand) && 
-          !/^[0-9+*#\s-]+$/.test(cand) && 
+          !cand.includes('%') &&
+          !/^(?:your|my|our|account|cbe|customer|dear|service)/i.test(cand) &&
+          !/^[0-9+*#\s-]+$/.test(cand) &&
           cand.length >= 2
         ) {
           counterparty = cand;
@@ -455,7 +718,7 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
       }
     }
 
-    // Rule E: "transfer to <NAME>", "transferred to <NAME>", "for transfer to <NAME>", "sent to <NAME>" for sent
+    // Rule E: "transfer to <NAME>"
     if (!counterparty && type === 'sent') {
       const toMatch = cleanMsg.match(/(?:(?:for\s+)?transfer(?:red)?\s+to|sent\s+to|debited\s+for(?:\s+transfer\s+to)?|paid\s+to|ተቀባይ|የተቀባይ\s*ስም|ለ)\s*(?:account\s+[0-9*]+\s+)?[:፡\-]?\s*([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+(?:with|on|ref|txn|ft|\/branchreceipt)|\.|$|,|;|\(|\n)/i);
       if (toMatch && toMatch[1]) {
@@ -466,7 +729,7 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
       }
     }
 
-    // Rule F: "from account ... (Name) to your account" (Only for received payments)
+    // Rule F: "from account ... (Name) to your account"
     if (!counterparty && type === 'received') {
       const fromAcctMatch = cleanMsg.match(/from\s+(?:account\s+[0-9*]+\s+)?\(?([A-Za-z\u1200-\u137F\s]{2,40}?)\)?\s+to\s+(?:your\s+account|account)/i);
       if (fromAcctMatch && fromAcctMatch[1]) {
@@ -476,39 +739,36 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
         }
       }
     }
-  } else if (bank === 'Telebirr') {
+  } else if (!counterparty && bank === 'Telebirr') {
     if (type === 'received') {
-      // Text between "ከ" and "("
       const fromMatch = cleanMsg.match(/ከ\s+([A-Za-z\u1200-\u137F\s]+?)\s*\(/);
       if (fromMatch && fromMatch[1]?.trim()) {
         counterparty = fromMatch[1].trim();
       } else {
         const engFrom = cleanMsg.match(/from\s+([A-Za-z\s]+?)(?:\s*\(|\s+on|\s+for|\.|$)/i);
-        if (engFrom && engFrom[1]?.trim()) {
+        if (engFrom && engFrom[1]?.trim() && !/your\s+telebirr/i.test(engFrom[1])) {
           counterparty = engFrom[1].trim();
         }
       }
-    } else {
-      // Sent/Paid: the word or name after "ለ"
+    } else if (type === 'sent') {
       const toMatch = cleanMsg.match(/ለ\s+([A-Za-z0-9\u1200-\u137F]+)/);
       if (toMatch && toMatch[1]?.trim()) {
         counterparty = toMatch[1].trim();
       } else {
-        const engTo = cleanMsg.match(/to\s+([A-Za-z0-9\s]+?)(?:\s*\(|\s+for|\s+on|\.|$|\s+Transaction)/i);
-        if (engTo && engTo[1]?.trim()) {
+        const engTo = cleanMsg.match(/\bto\s+([A-Za-z0-9\s.&'-]+?)(?:\s*\(|\s+for|\s+on|\.|$|\s+Transaction|\s+via)/i);
+        if (engTo && engTo[1]?.trim() && !/^withdraw\b/i.test(engTo[1].trim())) {
           counterparty = engTo[1].trim();
         }
       }
     }
   }
 
-  // General fallback for names across all banks if not yet found
+  // General fallback for all other Ethiopian banks (Awash, BOA, Dashen, Zemen, Siinqee, Wegagen, M-Pesa, etc.)
   if (!counterparty && category !== 'alert') {
-    // Check "by <Name> with txn id / on"
-    const byMatch = cleanMsg.match(/\b(?:by|በ)\s+([A-Za-z\u1200-\u137F\s]{2,40}?)(?:\s+with\s+(?:txn|tx|ref|id)|(?:\s+on\s+\d)|\.|$|,)/i);
+    const byMatch = cleanMsg.match(/\b(?:by|በ)\s+([A-Za-z\u1200-\u137F\s.&'-]{2,40}?)(?:\s+(?:with\s+)?(?:txn|tx|ref|id|ft)|\s+on\s+\d|\.|$|,)/i);
     if (byMatch && byMatch[1]) {
       const candidate = byMatch[1].trim();
-      if (!candidate.includes('%') && !/^(?:account|service|vat|bank|customer)/i.test(candidate) && !/^[0-9+*#\s-]+$/.test(candidate)) {
+      if (!candidate.includes('%') && !/^(?:account|service|vat|bank|customer|secret\s*code|ref\b)/i.test(candidate) && !/^[0-9+*#\s-]+$/.test(candidate)) {
         counterparty = candidate;
       }
     }
@@ -516,72 +776,81 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
 
   if (!counterparty && category !== 'alert') {
     if (type === 'received') {
-      const fromMatch = cleanMsg.match(/(?:from|ከ)\s+([A-Za-z\u1200-\u137F\s]+?)(?:\s*\(|\s+to\s+|\s+for|\.|$)/i);
+      const fromMatch = cleanMsg.match(/(?:from|ከ)\s+(?:account\s+[0-9*]+\s+)?([A-Za-z\u1200-\u137F\s.&'-]{2,45}?)(?:\s*\(|\s+(?:an\s+)?amount\b|\s+to\s+|\s+with\s+ref|\s+on\s+\d|\s+for\b|\.|$)/i);
       if (fromMatch && fromMatch[1]?.trim()) {
         const candidate = fromMatch[1].trim();
-        if (!candidate.includes('%') && !/^[0-9+*#\s-]+$/.test(candidate)) {
+        if (!candidate.includes('%') && !/^(?:your|account|bank|x+)/i.test(candidate) && !/^[0-9+*#\s-]+$/.test(candidate)) {
           counterparty = candidate;
         }
       }
     } else if (type === 'sent') {
-      const toMatch = cleanMsg.match(/(?:to|ለ)\s+([A-Za-z0-9\u1200-\u137F\s]+?)(?:\s*\(|\s+for|\.|$)/i);
+      const toMatch = cleanMsg.match(/(?:transferred\s+to|sent\s+to|paid\s+to|for\s+transfer\s+to|\bto|ለ)\s+(?:account\s+[0-9*]+\s+)?([A-Za-z0-9\u1200-\u137F\s.&'-]{2,45}?)(?:\s*\(|\s+with\s+ref|\s+on\s+\d|\s+for\b|\.|$)/i);
       if (toMatch && toMatch[1]?.trim()) {
         const candidate = toMatch[1].trim();
-        if (!candidate.includes('%')) {
+        if (!candidate.includes('%') && !/^(?:withdraw|your|account|bank|fayda)/i.test(candidate)) {
           counterparty = candidate;
+        }
+      }
+      if (!counterparty) {
+        const forFeeMatch = cleanMsg.match(/\bfor\s+the\s+([A-Za-z0-9\s.&'-]{3,50}?)(?:,\s*including|\s+including|\.|$)/i);
+        if (forFeeMatch && forFeeMatch[1]?.trim()) {
+          counterparty = forFeeMatch[1].trim();
         }
       }
     }
   }
 
-  // If this is an alert message and counterparty is empty, set friendly alert title
   if (category === 'alert' && !counterparty) {
-    counterparty = bank === 'BOA' ? 'BOA Service Alert' : bank ? `${bank} Alert` : 'Bank Notification';
+    counterparty = bank === 'Bank of Abyssinia' ? 'BOA Service Alert' : bank && bank !== 'Unknown' ? `${bank} Alert` : 'Bank Notification';
   }
 
-  // Clean up counterparty
   counterparty = counterparty
     .replace(/^(the|dear|customer|ለ|ከ|by|በ)\s+/i, '')
     .replace(/[\r\n።፤]+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 
   // 6. EXTRACT ACCOUNT NUMBER
   let accountNumber: string | undefined = undefined;
   if (type === 'received') {
     const fromAcc = cleanMsg.match(/from\s+account\s+([0-9*]{4,20})/i);
-    if (fromAcc && fromAcc[1]) {
-      accountNumber = fromAcc[1];
-    }
+    if (fromAcc?.[1]) accountNumber = fromAcc[1];
   } else if (type === 'sent') {
     const toAcc = cleanMsg.match(/to\s+account\s+([0-9*]{4,20})/i);
-    if (toAcc && toAcc[1]) {
-      accountNumber = toAcc[1];
-    }
+    if (toAcc?.[1]) accountNumber = toAcc[1];
   }
 
   if (!accountNumber) {
-    const accMatch = cleanMsg.match(/(?:account|acc\.?|a\/c|ሂሳብ\s*ቁጥር)\s*(?:no\.?|number)?\s*:?\s*([0-9*]{4,20})/i);
-    if (accMatch && accMatch[1]) {
-      accountNumber = accMatch[1];
+    const accMatch = cleanMsg.match(/(?:account|telebirr\s*account|acc\.?|a\/c|ሂሳብ\s*ቁጥር)\s*(?:no\.?|number)?\s*:?\s*([0-9*]{4,20})/i);
+    if (accMatch?.[1]) accountNumber = accMatch[1];
+  }
+
+  // 7. EXTRACT DATE / TIME (supports dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd)
+  let dateStr = new Date().toISOString();
+  let timestamp = Date.now();
+  const isoMatch = cleanMsg.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/);
+  const slashOrDashMatch = cleanMsg.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})\s+(\d{2}:\d{2}(?::\d{2})?)/);
+
+  if (isoMatch?.[1]) {
+    const parsedTs = Date.parse(isoMatch[1].replace(' ', 'T'));
+    if (!isNaN(parsedTs)) {
+      timestamp = parsedTs;
+      dateStr = new Date(parsedTs).toISOString();
+    }
+  } else if (slashOrDashMatch) {
+    const [, dd, mm, yyyy, time] = slashOrDashMatch;
+    const parsedTs = Date.parse(`${yyyy}-${mm}-${dd}T${time}`);
+    if (!isNaN(parsedTs)) {
+      timestamp = parsedTs;
+      dateStr = new Date(parsedTs).toISOString();
     }
   }
 
-  // 7. EXTRACT DATE / TIME
-  let dateStr = new Date().toISOString();
-  let timestamp = Date.now();
-  const dateMatch =
-    cleanMsg.match(/(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?)/) ||
-    cleanMsg.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/);
-
-  if (dateMatch && dateMatch[1]) {
-    try {
-      const parsedTs = Date.parse(dateMatch[1].replace(/-/g, '/'));
-      if (!isNaN(parsedTs)) {
-        timestamp = parsedTs;
-        dateStr = new Date(parsedTs).toISOString();
-      }
-    } catch {}
-  }
+  // 8. BUILD RECEIPT URL (alerts/OTPs never get a fake payment receipt link)
+  const receiptUrl =
+    category === 'alert'
+      ? undefined
+      : buildOfficialReceiptUrl(bank, reference, accountNumber, extractedUrl);
 
   return {
     bank,
@@ -596,9 +865,12 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
     reference,
     ftNumber,
     v2Code,
+    receiptUrl,
     accountNumber,
     balance,
     balanceSantim,
+    fee,
+    feeCents,
     date: dateStr,
     timestamp,
     rawMessage: originalMsg,
@@ -606,7 +878,7 @@ export function parseBankSms(sender: string, message: string, customMap?: Record
 }
 
 // -------------------------------------------------------------
-// BENCHMARK REAL SAMPLE SUITE FOR HIDDEN TEST SCREEN (8 SAMPLES)
+// BENCHMARK REAL SAMPLE SUITE
 // -------------------------------------------------------------
 export interface ParserBenchmarkSample {
   id: string;
@@ -718,13 +990,15 @@ export const OFFICIAL_PARSER_BENCHMARKS: ParserBenchmarkSample[] = [
   {
     id: 'sample-8',
     sampleNum: 8,
-    title: 'Telebirr English Received and Transferred',
+    title: 'Telebirr Completed ATM Withdrawal (100 ETB)',
     sender: '127',
-    raw: 'You have received ETB 2,800.00 from Dawit Haile (0912345678) … Transaction number is 10E9944P1X',
+    raw: 'Dear Aymen The request to withdraw ETB 100.00 from your telebirr account 251996910607 via secret code 215822 on 2026-11-24 12:46:58 using Awash International Bank S C ATM with transaction number DK06LG3250 is successfully completed. The service fee (including 15% VAT) is ETB 0.57. Your current Account balance is ETB 1,785.36.To download your payment information please click this link: https://transactioninfo.ethiotelecom.et/receipt/DK06LG3250',
     expectedBank: 'Telebirr',
-    expectedType: 'received',
-    expectedAmount: 2800.0,
-    expectedCounterparty: 'Dawit Haile',
-    expectedRef: '10E9944P1X',
+    expectedType: 'sent',
+    expectedCategory: 'atm-card',
+    expectedAmount: 100.0,
+    expectedCounterparty: 'Awash International Bank S C ATM',
+    expectedRef: 'DK06LG3250',
+    expectedBalance: 1785.36,
   },
 ];

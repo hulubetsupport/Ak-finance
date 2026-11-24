@@ -1,168 +1,95 @@
 import React from 'react';
-import { Bell, Eye, EyeOff, Globe, MoreVertical } from 'lucide-react';
+import { Eye, EyeOff, Globe, Search, MoreVertical, MessageSquarePlus } from 'lucide-react';
 import { AppSettings } from '../types/index.ts';
-import { NativeStatus } from '../utils/nativeBridge.ts';
 import { translations } from '../utils/i18n.ts';
 
 interface HeaderProps {
   settings: AppSettings;
-  nativeStatus: NativeStatus;
-  hasIgnoredRecentPayment?: boolean;
+  pageTitle: string;
   onToggleHideBalances: () => void;
   onToggleLanguage: () => void;
-  onOpenNotifications: () => void;
-  onOpenSettings: () => void;
+  onOpenSearch: () => void;
+  onOpenSimulator: () => void;
   onOpenMenu: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   settings,
-  nativeStatus,
-  hasIgnoredRecentPayment = false,
+  pageTitle,
   onToggleHideBalances,
   onToggleLanguage,
-  onOpenNotifications,
-  onOpenSettings,
+  onOpenSearch,
+  onOpenSimulator,
   onOpenMenu,
 }) => {
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
 
-  // Header pill rule:
-  // "Connected" (green) ONLY if smsGranted && url set && pending==0 && lastCode==200;
-  // amber "n pending"; red "Not set up" if permission or URL missing; grey in Local mode.
-  // Amber if a recent payment was Ignored by the server (Part B).
-  const getStatusDisplay = () => {
-    if (settings.mode === 'local') {
-      return {
-        label: t.localMode,
-        dotClass: 'bg-slate-400',
-        badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
-      };
-    }
-
-    if (hasIgnoredRecentPayment) {
-      return {
-        label: isAm ? 'ክፍያ ተትቷል (Ignored)' : 'Server Ignored SMS',
-        dotClass: 'bg-amber-500 animate-pulse',
-        badgeClass: 'bg-amber-50 text-amber-900 border-amber-300 font-bold',
-      };
-    }
-
-    const hasUrl = !!settings.serverUrl?.trim();
-    if (!nativeStatus.smsGranted || !hasUrl) {
-      return {
-        label: isAm ? 'አልተዋቀረም' : 'Not set up',
-        dotClass: 'bg-rose-500',
-        badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
-      };
-    }
-
-    if (nativeStatus.pending > 0) {
-      return {
-        label: `${nativeStatus.pending} ${isAm ? 'በመጠባበቅ' : 'pending'}`,
-        dotClass: 'bg-amber-500 animate-pulse',
-        badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
-      };
-    }
-
-    if (nativeStatus.smsGranted && hasUrl && nativeStatus.pending === 0 && nativeStatus.lastCode === 200) {
-      return {
-        label: t.connected,
-        dotClass: 'bg-emerald-500',
-        badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200/80',
-      };
-    }
-
-    // Server configured, permissions granted, waiting for first SMS / response
-    if (nativeStatus.lastCode > 0 && nativeStatus.lastCode !== 200) {
-      return {
-        label: `HTTP ${nativeStatus.lastCode}`,
-        dotClass: 'bg-rose-500',
-        badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
-      };
-    }
-
-    return {
-      label: isAm ? 'ተዘጋጅቷል' : 'Ready',
-      dotClass: 'bg-amber-400',
-      badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
-    };
-  };
-
-  const status = getStatusDisplay();
-
   return (
-    <header className="sticky top-0 z-30 bg-[#F4F7F5]/95 backdrop-blur-md px-4 pt-3 pb-2 border-b border-slate-200/60">
-      <div className="max-w-md mx-auto flex items-center justify-between">
-        {/* Brand Logo & Tagline */}
-        <div className="flex flex-col cursor-pointer" onClick={onOpenSettings}>
-          <div className="flex items-center gap-1.5">
-            <span className="font-extrabold text-2xl tracking-tight text-[#14503F] font-['Poppins',sans-serif]">
-              Ak Financial
-            </span>
-            <span className="w-1.5 h-1.5 rounded-full bg-[#14503F] mt-1"></span>
-          </div>
-          <span className="text-[9px] font-semibold tracking-widest text-slate-400 uppercase">
-            {t.tagline}
-          </span>
-        </div>
+    <header className="sticky top-0 z-30 h-13 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 sm:px-4 lg:px-6 flex items-center justify-between gap-2 sm:gap-4">
+      {/* Zone 1: Brand on Mobile / Page Title on Desktop */}
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+        <span className="lg:hidden font-display font-bold text-[15px] sm:text-base tracking-tight text-[#0F4C3A] whitespace-nowrap shrink-0">
+          {t.appTitle}
+        </span>
+        <h1 className="hidden lg:block font-display font-semibold text-base text-slate-900 truncate">
+          {pageTitle}
+        </h1>
+      </div>
 
-        {/* Center / Right controls */}
-        <div className="flex items-center gap-1.5">
-          {/* Status Pill */}
-          <button
-            onClick={onOpenSettings}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border shadow-xs transition-colors ${status.badgeClass}`}
-            title="Click to view connection & queue settings"
-          >
-            <span className={`w-2 h-2 rounded-full ${status.dotClass}`} />
-            <span>{status.label}</span>
-          </button>
+      {/* Zone 2: Minimal Utility Controls */}
+      <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={onOpenSearch}
+          aria-label="Search transactions"
+          className="min-h-[40px] min-w-[34px] sm:min-w-[40px] px-1.5 sm:px-2.5 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 flex items-center justify-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0"
+          title="Search"
+        >
+          <Search size={16} />
+          <span className="hidden md:inline">{isAm ? 'ፈልግ' : 'Search'}</span>
+        </button>
 
-          {/* Privacy Eye Toggle */}
-          <button
-            onClick={onToggleHideBalances}
-            aria-label={settings.hideBalances ? 'Show balances' : 'Hide balances'}
-            className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-600 hover:text-slate-900 shadow-xs transition-all active:scale-95"
-            title={settings.hideBalances ? 'Show amounts' : 'Hide amounts'}
-          >
-            {settings.hideBalances ? <EyeOff size={15} /> : <Eye size={15} />}
-          </button>
+        <button
+          type="button"
+          onClick={onToggleHideBalances}
+          aria-label={settings.hideBalances ? 'Show balances' : 'Hide balances'}
+          className="min-h-[40px] min-w-[34px] sm:min-w-[40px] rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 flex items-center justify-center transition-colors shrink-0"
+          title={settings.hideBalances ? 'Show balances' : 'Hide balances'}
+        >
+          {settings.hideBalances ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
 
-          {/* Language Toggle */}
-          <button
-            onClick={onToggleLanguage}
-            aria-label="Toggle language"
-            className="px-2 py-1 rounded-lg bg-white border border-slate-200 flex items-center gap-1 text-[11px] font-semibold text-slate-700 hover:text-slate-900 shadow-xs transition-all active:scale-95"
-            title="Toggle Amharic / English"
-          >
-            <Globe size={13} className="text-slate-400" />
-            <span>{settings.language === 'en' ? 'EN' : 'አማ'}</span>
-          </button>
+        <button
+          type="button"
+          onClick={onToggleLanguage}
+          aria-label="Toggle language"
+          className="min-h-[40px] px-2 sm:px-2.5 rounded-lg text-slate-700 hover:text-slate-900 hover:bg-slate-100 flex items-center gap-1 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+          title="Switch English / Amharic"
+        >
+          <Globe size={14} className="hidden sm:block text-slate-400" />
+          <span>{settings.language === 'en' ? 'EN' : 'አማ'}</span>
+        </button>
 
-          {/* Notification Bell */}
-          <button
-            onClick={onOpenNotifications}
-            aria-label="Notifications"
-            className="relative w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-600 hover:text-slate-900 shadow-xs transition-all active:scale-95"
-          >
-            <Bell size={16} />
-            {nativeStatus.pending > 0 && (
-              <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-white" />
-            )}
-          </button>
+        {/* Primary CTA */}
+        <button
+          type="button"
+          onClick={onOpenSimulator}
+          className="min-h-[38px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#0F4C3A] text-white hover:bg-[#0B3A2C] text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+        >
+          <MessageSquarePlus size={14} />
+          <span className="sm:hidden">{isAm ? 'SMS' : 'SMS'}</span>
+          <span className="hidden sm:inline">{t.simulateSms}</span>
+        </button>
 
-          {/* 3-dot Header Menu (Rule C1) */}
-          <button
-            onClick={onOpenMenu}
-            aria-label="Menu"
-            className="w-8 h-8 rounded-full bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:text-[#14503F] shadow-xs transition-all active:scale-95"
-            title="Settings, Security, Backup & Restore, About"
-          >
-            <MoreVertical size={16} />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onOpenMenu}
+          aria-label="More options"
+          className="lg:hidden min-h-[40px] min-w-[34px] sm:min-w-[40px] rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 flex items-center justify-center transition-colors shrink-0"
+        >
+          <MoreVertical size={17} />
+        </button>
       </div>
     </header>
   );

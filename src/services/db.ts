@@ -1,23 +1,51 @@
-import { PaymentRecord, Account, WithdrawalRecord, AppSettings, SyncLogEntry, SyncStatus, ServerResultRecord, MonthlyBudget } from '../types/index.ts';
-import { parseBankSms, DEFAULT_SENDER_BANK_MAP } from '../utils/smsParser.ts';
-import { 
-  getNativeSettings, 
-  saveNativeSettings, 
-  getNativeMessages, 
-  deleteNativeMessage, 
+import {
+  PaymentRecord,
+  Account,
+  WithdrawalRecord,
+  AppSettings,
+  SyncLogEntry,
+  SyncStatus,
+  ServerResultRecord,
+  MonthlyBudget,
+  PaymentCategory,
+  PaymentType,
+} from '../types/index.ts';
+import {
+  parseBankSms,
+  buildOfficialReceiptUrl,
+  isCbeBank,
+} from '../utils/smsParser.ts';
+import {
+  resolveAllowedAiModel,
+} from '../constants/aiModels.ts';
+import {
+  getNativeSettings,
+  saveNativeSettings,
+  getNativeMessages,
+  deleteNativeMessage,
   clearAllNativeMessages,
+  clearAllNativeState,
   insertNativeTestSms,
+  importNativeMessagesBatch,
+  updateNativeMessageStatus,
   getNativeOpeningBalances,
   saveNativeOpeningBalance,
+  saveNativeOpeningBalancesBatch,
   getNativeSmsOverrides,
   saveNativeSmsOverride,
+  saveNativeSmsOverridesBatch,
   getNativeSenderBankMap,
   saveNativeSenderBankMap,
+  saveNativeSenderBankMapBatch,
   deleteNativeSenderBankMap,
   getNativeCounterpartyTags,
   saveNativeCounterpartyTag,
+  saveNativeCounterpartyTagsBatch,
   getNativeServerResults,
-  NativeSmsMessage 
+  saveNativeServerResult,
+  saveNativeServerResultsBatch,
+  getAiParsedCache,
+  saveAiParsedCacheEntry,
 } from '../utils/nativeBridge.ts';
 
 const LOCAL_STORAGE_KEYS = {
@@ -37,7 +65,7 @@ export const DEFAULT_BANK_ACCOUNTS: Omit<Account, 'balance' | 'receivedThisMonth
     name: 'Telebirr',
     bank: 'Telebirr',
     shortCode: 'TLB',
-    senderIds: ['127'],
+    senderIds: ['127', 'Telebirr'],
     type: 'mobile',
     accountNumber: '127',
     maskedNumber: '127 · Telebirr',
@@ -105,15 +133,25 @@ export const DEFAULT_BANK_ACCOUNTS: Omit<Account, 'balance' | 'receivedThisMonth
 ];
 
 class DatabaseService {
-  public async getSettings(): Promise<AppSettings> {
-    const native = await getNativeSettings();
-    let uiPrefs: any = {};
+  private getUiPrefs(): Record<string, any> {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.UI_PREFS);
-      if (stored) uiPrefs = JSON.parse(stored);
+      if (stored) return JSON.parse(stored);
     } catch {}
+    return {};
+  }
 
-    const sendersArr = (native.senders || 'CBE,127,AwashBank,Dashen,BOA')
+  private saveUiPrefs(prefs: Record<string, any>): void {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.UI_PREFS, JSON.stringify(prefs));
+    } catch {}
+  }
+
+  public async getSettings(): Promise<AppSettings> {
+    const native = await getNativeSettings();
+    const uiPrefs = this.getUiPrefs();
+
+    const sendersArr = (native.senders || 'CBE,127,Telebirr,AwashBank,Dashen,BOA')
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
@@ -131,6 +169,9 @@ class DatabaseService {
       excludeHiddenFromTotal: !!uiPrefs.excludeHiddenFromTotal,
       startHiddenAfterUnlock: !!uiPrefs.startHiddenAfterUnlock,
       serviceRunning: true,
+      aiEnabled: uiPrefs.aiEnabled !== false,
+      aiAutoParseUnknown: !!uiPrefs.aiAutoParseUnknown,
+      aiModel: resolveAllowedAiModel(uiPrefs.aiModel),
     };
   }
 
@@ -145,20 +186,16 @@ class DatabaseService {
 
     await saveNativeSettings(toNative);
 
-    let uiPrefs: any = {};
-    try {
-      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.UI_PREFS);
-      if (stored) uiPrefs = JSON.parse(stored);
-    } catch {}
-
+    const uiPrefs = this.getUiPrefs();
     if (newSettings.language !== undefined) uiPrefs.language = newSettings.language;
     if (newSettings.hideBalances !== undefined) uiPrefs.hideBalances = newSettings.hideBalances;
     if (newSettings.soundEnabled !== undefined) uiPrefs.soundEnabled = newSettings.soundEnabled;
     if (newSettings.excludeHiddenFromTotal !== undefined) uiPrefs.excludeHiddenFromTotal = newSettings.excludeHiddenFromTotal;
     if (newSettings.startHiddenAfterUnlock !== undefined) uiPrefs.startHiddenAfterUnlock = newSettings.startHiddenAfterUnlock;
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEYS.UI_PREFS, JSON.stringify(uiPrefs));
-    } catch {}
+    if (newSettings.aiEnabled !== undefined) uiPrefs.aiEnabled = newSettings.aiEnabled;
+    if (newSettings.aiAutoParseUnknown !== undefined) uiPrefs.aiAutoParseUnknown = newSettings.aiAutoParseUnknown;
+    if (newSettings.aiModel !== undefined) uiPrefs.aiModel = resolveAllowedAiModel(newSettings.aiModel);
+    this.saveUiPrefs(uiPrefs);
 
     return this.getSettings();
   }
@@ -169,7 +206,6 @@ class DatabaseService {
 
   public async saveSenderBankMapping(sender: string, bankName: string): Promise<void> {
     await saveNativeSenderBankMap(sender, bankName);
-    // Also ensure sender is in SharedPreferences "ejeta" senders string
     const settings = await this.getSettings();
     if (!settings.allowedSenders.some(s => s.toLowerCase() === sender.toLowerCase())) {
       const updated = [...settings.allowedSenders, sender];
@@ -191,7 +227,15 @@ class DatabaseService {
 
   public async saveSmsOverride(
     smsId: string,
-    override: { counterparty?: string | null; direction?: string | null; note?: string; tag?: string; isHidden?: boolean; reference?: string }
+    override: {
+      counterparty?: string | null;
+      direction?: string | null;
+      note?: string;
+      tag?: string;
+      isHidden?: boolean;
+      reference?: string;
+      category?: string;
+    }
   ): Promise<void> {
     await saveNativeSmsOverride(
       Number(smsId),
@@ -200,9 +244,9 @@ class DatabaseService {
       override.note || '',
       !!override.isHidden,
       override.tag || '',
-      override.reference || ''
+      override.reference || '',
+      override.category
     );
-    // If tag is set and counterparty is non-empty, remember it
     if (override.tag && override.counterparty) {
       await saveNativeCounterpartyTag(override.counterparty.trim(), override.tag.trim());
     }
@@ -224,11 +268,13 @@ class DatabaseService {
       getNativeCounterpartyTags(),
       getNativeServerResults(),
     ]);
+    const aiCache = getAiParsedCache();
 
-    // Parse and augment with overrides and server results
     const parsedList: PaymentRecord[] = messages.map(msg => {
       const parsed = parseBankSms(msg.sender || 'Bank', msg.body || '', senderMap);
-      let status: SyncStatus = 'pending';
+      const aiEntry = aiCache[String(msg.id)];
+
+      let status: SyncStatus = 'local';
       if (msg.status === 'sent') status = 'sent';
       else if (msg.status === 'local') status = 'local';
       else if (msg.status === 'failed') status = 'failed';
@@ -237,11 +283,50 @@ class DatabaseService {
       const ov = overrides[String(msg.id)];
       const sr = serverResults[String(msg.id)];
 
-      let serverResultObj: ServerResultRecord | undefined = undefined;
+      // Merge AI cached extraction only when local deterministic parser could not extract amount or bank
+      let bank = parsed.bank;
+      let amount = parsed.amount;
+      let amountCents = parsed.amountCents;
+      let amountSantim = parsed.amountSantim ?? parsed.amountCents;
+      let fee = parsed.fee;
+      let feeCents = parsed.feeCents;
+      let balance = parsed.balance;
+      let balanceSantim = parsed.balanceSantim;
+      let counterparty = parsed.counterparty;
+      let type: PaymentType = parsed.type;
+      let category: PaymentCategory = parsed.category;
       let ftNumber = parsed.ftNumber;
       let v2Code = parsed.v2Code;
       let reference = parsed.reference || `SMS-${msg.id}`;
+      let receiptUrl = parsed.receiptUrl;
+      let aiParsed = false;
 
+      if (aiEntry && (parsed.amount === 0 || parsed.bank === 'Unknown' || parsed.category === 'alert')) {
+        if (aiEntry.bank && (parsed.bank === 'Unknown' || !parsed.bank)) bank = aiEntry.bank;
+        if (typeof aiEntry.amount === 'number' && aiEntry.amount > 0 && parsed.amount === 0) {
+          amount = aiEntry.amount;
+          amountCents = Math.round(aiEntry.amount * 100);
+          amountSantim = amountCents;
+        }
+        if (typeof aiEntry.fee === 'number' && aiEntry.fee > 0 && fee === undefined) {
+          fee = aiEntry.fee;
+          feeCents = Math.round(aiEntry.fee * 100);
+        }
+        if (typeof aiEntry.balance === 'number' && balance === undefined) {
+          balance = aiEntry.balance;
+          balanceSantim = Math.round(aiEntry.balance * 100);
+        }
+        if (aiEntry.counterparty && !counterparty) counterparty = aiEntry.counterparty;
+        if (aiEntry.type && type === 'unknown') type = aiEntry.type;
+        if (aiEntry.category && (category === 'other' || category === 'alert')) {
+          category = aiEntry.category as PaymentCategory;
+        }
+        if (aiEntry.reference && reference.startsWith('SMS-')) reference = aiEntry.reference;
+        if (aiEntry.receiptUrl && !receiptUrl) receiptUrl = aiEntry.receiptUrl;
+        aiParsed = true;
+      }
+
+      let serverResultObj: ServerResultRecord | undefined = undefined;
       if (sr) {
         let parsedRaw: any = {};
         if (sr.raw) {
@@ -264,9 +349,8 @@ class DatabaseService {
           amount: parsedRaw.amount,
         };
 
-        // When the server returns a ref, save it as the FT
         if (serverResultObj.ref) {
-          ftNumber = serverResultObj.ref;
+          if (isCbeBank(bank)) ftNumber = serverResultObj.ref;
           reference = serverResultObj.ref;
         }
         if (serverResultObj.v2 && !v2Code) {
@@ -274,77 +358,84 @@ class DatabaseService {
         }
       }
 
-      // Check if reference/FT was manually or auto overridden
       if (ov?.reference) {
-        ftNumber = ov.reference;
+        if (isCbeBank(bank)) ftNumber = ov.reference;
         reference = ov.reference;
       }
 
       const isHidden = ov ? !!ov.isHidden : false;
-      let counterparty = ov?.counterparty || parsed.counterparty;
-      let type = (ov?.direction as any) || parsed.type;
-      let category = parsed.category;
+      if (ov?.counterparty) counterparty = ov.counterparty;
+      if (ov?.direction) type = ov.direction as PaymentType;
+      if (ov?.category) category = ov.category as PaymentCategory;
       const note = ov?.note || undefined;
 
-      const isServerIgnoredNonPayment = Boolean(
-        serverResultObj && (
-          serverResultObj.status === 'Ignored' || 
-          (serverResultObj.reason && /not\s*a\s*payment|not\s*financial|ignored/i.test(serverResultObj.reason))
-        )
+      // CRITICAL BUG FIX (#6 & #8):
+      // If the legacy server only supports CBE/Telebirr and replies `Ignored`, NEVER erase a valid local parse
+      // (such as Telebirr ATM Withdrawal screenshot 184622, Awash, Dashen, BOA, Zemen, Siinqee, etc.)!
+      // Only treat as an informational `alert` when the LOCAL parser itself identified it as a non-financial alert/OTP.
+      const serverIgnored = Boolean(
+        serverResultObj &&
+          (serverResultObj.status === 'Ignored' ||
+            (serverResultObj.reason && /not\s*a\s*payment|not\s*financial|ignored|unsupported/i.test(serverResultObj.reason)))
       );
+      const serverIgnoredReason = serverIgnored
+        ? serverResultObj?.reason || 'Server ignored this SMS; parsed & saved locally by Ak Finance'
+        : undefined;
 
-      if ((isServerIgnoredNonPayment || parsed.amount === 0) && (category === 'other' || category === 'transfer' || category === 'alert')) {
+      const localIsAlert = (category === 'alert' || amount === 0) && !ov?.direction;
+      if (localIsAlert) {
         category = 'alert';
         type = 'unknown';
+        receiptUrl = undefined;
         if (!counterparty || counterparty.toLowerCase().includes('unknown')) {
-          counterparty = parsed.bank === 'BOA' ? 'BOA Service Alert' : `${parsed.bank} Service Alert`;
+          counterparty = bank === 'Bank of Abyssinia' || bank === 'BOA' ? 'BOA Service Alert' : `${bank} Service Alert`;
         }
       }
 
-      // Fix Tag Bug (Part B):
-      // Only remember tags by a real non-empty counterparty name (or account tail).
-      // NEVER auto-apply a tag, only SUGGEST it as a tappable chip.
-      // Remove tags that were auto-applied to rows without a name.
+      if (!receiptUrl && !localIsAlert && category !== 'alert') {
+        receiptUrl = buildOfficialReceiptUrl(bank, v2Code || reference, parsed.accountNumber);
+      }
+
       const hasRealName = Boolean(counterparty && counterparty.trim().length > 0);
       const cleanCp = hasRealName ? counterparty.trim() : '';
-      const rememberedTag = cleanCp ? (counterpartyTags[cleanCp] || counterpartyTags[cleanCp.toLowerCase()]) : undefined;
+      const rememberedTag = cleanCp
+        ? counterpartyTags[cleanCp] || counterpartyTags[cleanCp.toLowerCase()]
+        : undefined;
 
-      // Only apply tag if explicitly set by user override (and never if nameless auto-applied tag)
       let tag: string | undefined = undefined;
-      if (ov?.tag) {
-        if (hasRealName || (parsed.accountNumber && parsed.accountNumber.length > 0)) {
-          tag = ov.tag;
-        }
+      if (ov?.tag && (hasRealName || (parsed.accountNumber && parsed.accountNumber.length > 0))) {
+        tag = ov.tag;
       }
-
-      // Suggest remembered tag as a chip if not already tagged
       const suggestedTag = !tag && rememberedTag ? rememberedTag : undefined;
-      const isOverridden = !!(ov && (ov.counterparty || ov.direction || ov.note || ov.tag || ov.isHidden));
+      const isOverridden = !!(ov && (ov.counterparty || ov.direction || ov.note || ov.tag || ov.isHidden || ov.reference));
 
       return {
         id: String(msg.id),
         senderAddress: msg.sender || '',
-        bank: parsed.bank,
+        bank,
         type,
         category,
-        amount: parsed.amount,
-        amountCents: parsed.amountCents,
-        amountSantim: parsed.amountSantim ?? parsed.amountCents,
-        fee: parsed.fee,
-        feeCents: parsed.feeCents,
+        amount,
+        amountCents,
+        amountSantim,
+        fee,
+        feeCents,
         currency: 'ETB',
         counterparty,
         reference,
         ftNumber,
         v2Code,
+        receiptUrl,
         accountNumber: parsed.accountNumber,
-        balance: parsed.balance,
-        balanceSantim: parsed.balanceSantim,
-        extractedBalance: parsed.balance,
+        balance,
+        balanceSantim,
+        extractedBalance: balance,
         rawMessage: msg.body || '',
         timestamp: msg.ts || Date.now(),
         date: parsed.date || new Date(msg.ts || Date.now()).toISOString(),
         syncStatus: status,
+        serverIgnored,
+        serverIgnoredReason,
         retryCount: msg.tries || 0,
         errorMessage: msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : undefined),
         serverResponse: msg.code ? `HTTP ${msg.code}` : undefined,
@@ -356,10 +447,10 @@ class DatabaseService {
         suggestedTag,
         isHidden,
         isOverridden,
+        aiParsed,
       };
     });
 
-    // Sort chronologically (oldest to newest) to detect duplicates by Reference
     parsedList.sort((a, b) => a.timestamp - b.timestamp);
 
     const seenRefs = new Set<string>();
@@ -367,7 +458,6 @@ class DatabaseService {
       if (p.reference && !p.reference.startsWith('SMS-')) {
         const cleanRef = p.reference.toUpperCase().trim();
         if (seenRefs.has(cleanRef)) {
-          // Rule 6: DEDUPE by Ref: if same Ref already exists, mark second as duplicate
           p.isDuplicate = true;
         } else {
           seenRefs.add(cleanRef);
@@ -376,7 +466,6 @@ class DatabaseService {
       }
     }
 
-    // Sort descending (newest first) for UI presentation
     parsedList.sort((a, b) => b.timestamp - a.timestamp);
 
     if (!includeHidden) {
@@ -388,6 +477,147 @@ class DatabaseService {
   public async getPaymentById(id: string): Promise<PaymentRecord | null> {
     const list = await this.getAllPayments(true);
     return list.find(p => p.id === id) || null;
+  }
+
+  /**
+   * Sync a locally-saved SMS record to the user's configured webhook server via `/api/sync/forward`.
+   * Preserves local parsing even if the server replies `Ignored` or errors.
+   */
+  public async syncPaymentToServer(paymentId: string): Promise<{ ok: boolean; status: string; message: string }> {
+    const [settings, messages] = await Promise.all([this.getSettings(), getNativeMessages()]);
+    const msg = messages.find(m => String(m.id) === String(paymentId));
+    if (!msg) return { ok: false, status: 'Error', message: 'Record not found in local storage.' };
+
+    const targetUrl = (settings.serverUrl || '').trim();
+    if (!targetUrl) {
+      return {
+        ok: false,
+        status: 'NoServer',
+        message: 'No webhook server URL configured in Settings. Saved locally.',
+      };
+    }
+
+    try {
+      const response = await fetch('/api/sync/forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: targetUrl,
+          serverUrl: targetUrl,
+          method: settings.httpMethod || 'GET',
+          token: settings.secretKey || '',
+          sender: msg.sender || '',
+          message: msg.body || '',
+          ts: msg.ts || Date.now(),
+        }),
+      });
+      const data = await response.json();
+      const httpCode = Number(data?.httpCode || response.status || 0);
+      const parsedReply = data?.parsed || {};
+      const replyStatus = parsedReply.status || data?.status || (response.ok && data?.ok ? 'Saved' : 'Unknown');
+      const reason = parsedReply.reason || data?.reason || data?.error || '';
+      const ref = parsedReply.ref || data?.ref || '';
+      const rawBody = typeof data?.raw === 'string' ? data.raw : JSON.stringify(data);
+
+      await saveNativeServerResult(msg.id, httpCode, replyStatus, ref, reason, rawBody);
+
+      if (data?.ok) {
+        await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null);
+        return {
+          ok: true,
+          status: replyStatus,
+          message:
+            replyStatus === 'Ignored'
+              ? `Server replied Ignored (${reason || 'unsupported by server'}); local record preserved.`
+              : `Synced to server (${replyStatus}${ref ? ` · ${ref}` : ''}).`,
+        };
+      } else {
+        const errMsg = data?.error || `HTTP ${httpCode || 500}`;
+        await updateNativeMessageStatus(msg.id, 'failed', httpCode || 500, errMsg);
+        return { ok: false, status: 'Failed', message: errMsg };
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || 'Network sync failed';
+      await updateNativeMessageStatus(msg.id, 'failed', 0, errMsg);
+      return { ok: false, status: 'Failed', message: errMsg };
+    }
+  }
+
+  public async syncAllLocalToServer(): Promise<{ synced: number; ignored: number; failed: number; error?: string }> {
+    const settings = await this.getSettings();
+    if (!settings.serverUrl?.trim()) {
+      return { synced: 0, ignored: 0, failed: 0, error: 'Server webhook URL is not configured in Settings.' };
+    }
+    const payments = await this.getAllPayments(true);
+    const unsynced = payments.filter(p => p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed');
+    let synced = 0;
+    let ignored = 0;
+    let failed = 0;
+
+    for (const p of unsynced) {
+      const res = await this.syncPaymentToServer(p.id);
+      if (res.ok) {
+        if (res.status === 'Ignored') ignored++;
+        else synced++;
+      } else {
+        failed++;
+      }
+    }
+    return { synced, ignored, failed };
+  }
+
+  /**
+   * Invoke server-side Gemini AI (`/api/ai/parse-sms`) to extract structured fields for an unrecognized SMS
+   */
+  public async parseUnknownSmsWithAi(paymentId: string): Promise<{ ok: boolean; error?: string }> {
+    const [settings, messages] = await Promise.all([this.getSettings(), getNativeMessages()]);
+    const msg = messages.find(m => String(m.id) === String(paymentId));
+    if (!msg) return { ok: false, error: 'Message not found' };
+
+    try {
+      const resp = await fetch('/api/ai/parse-sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: msg.sender,
+          message: msg.body,
+          model: settings.aiModel || 'gemini-4-hydrogen',
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data?.ok || !data?.parsed) {
+        return { ok: false, error: data?.error || 'AI parsing unavailable' };
+      }
+      saveAiParsedCacheEntry(String(msg.id), {
+        ...data.parsed,
+        updatedAt: Date.now(),
+      });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'AI request failed' };
+    }
+  }
+
+  public async analyzeRawSmsWithAi(sender: string, message: string): Promise<{ ok: boolean; parsed?: any; error?: string }> {
+    const settings = await this.getSettings();
+    try {
+      const resp = await fetch('/api/ai/parse-sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender,
+          message,
+          model: settings.aiModel || 'gemini-4-hydrogen',
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data?.ok || !data?.parsed) {
+        return { ok: false, error: data?.error || 'AI parsing unavailable' };
+      }
+      return { ok: true, parsed: data.parsed };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'AI request failed' };
+    }
   }
 
   public getHiddenBankIds(): string[] {
@@ -402,8 +632,7 @@ class DatabaseService {
   }
 
   public isBankHidden(bankId: string): boolean {
-    const hidden = this.getHiddenBankIds();
-    return hidden.includes(bankId);
+    return this.getHiddenBankIds().includes(bankId);
   }
 
   public async toggleBankHidden(bankId: string): Promise<boolean> {
@@ -443,7 +672,6 @@ class DatabaseService {
       } catch {}
     }
 
-    // Stop monitoring: remove sender IDs from allowedSenders in native SharedPreferences
     const accounts = await this.getAccounts(true);
     const target = accounts.find(a => a.id === id);
     if (target && target.senderIds && target.senderIds.length > 0) {
@@ -461,7 +689,6 @@ class DatabaseService {
       localStorage.setItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS, JSON.stringify(list));
     } catch {}
 
-    // Resume monitoring: add sender IDs back to allowedSenders
     const accounts = await this.getAccounts(true);
     const target = accounts.find(a => a.id === id);
     if (target && target.senderIds && target.senderIds.length > 0) {
@@ -481,12 +708,10 @@ class DatabaseService {
   }
 
   public async saveAccount(account: Account): Promise<void> {
-    // 1. If opening balance changed, persist it
     if (account.openingBalance !== undefined) {
       await this.saveOpeningBalance(account.bank, account.openingBalance);
     }
 
-    // 2. Persist custom/overridden accounts
     let userAdded: Account[] = [];
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
@@ -503,13 +728,10 @@ class DatabaseService {
       localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(userAdded));
     } catch {}
 
-    // 3. Update sender IDs mapping & monitored senders
     if (account.senderIds && account.senderIds.length > 0) {
       for (const s of account.senderIds) {
         const cleanS = s.trim();
-        if (cleanS) {
-          await this.saveSenderBankMapping(cleanS, account.bank);
-        }
+        if (cleanS) await this.saveSenderBankMapping(cleanS, account.bank);
       }
       const settings = await this.getSettings();
       const existing = new Set(settings.allowedSenders.map(s => s.toLowerCase().trim()));
@@ -526,14 +748,12 @@ class DatabaseService {
       this.getOpeningBalances(),
     ]);
 
-    // Load any user-added or overridden bank accounts
     let userAdded: Account[] = [];
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
       if (stored) userAdded = JSON.parse(stored);
     } catch {}
 
-    // Merge default accounts with user overrides
     const baseMap = new Map<string, any>();
     for (const d of DEFAULT_BANK_ACCOUNTS) {
       baseMap.set(d.id, { ...d });
@@ -544,7 +764,6 @@ class DatabaseService {
 
     let baseAccounts = Array.from(baseMap.values());
 
-    // Filter archived accounts
     const archivedIds = new Set(this.getArchivedBankIds());
     if (!includeArchived) {
       baseAccounts = baseAccounts.filter(a => !archivedIds.has(a.id));
@@ -555,7 +774,6 @@ class DatabaseService {
       }));
     }
 
-    // Apply custom order if stored
     try {
       const storedOrder = localStorage.getItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER);
       if (storedOrder) {
@@ -574,15 +792,13 @@ class DatabaseService {
     const currentYear = new Date().getFullYear();
 
     return baseAccounts.map(base => {
-      // Find payments matching this bank (case-insensitive)
       const bankNorm = base.bank.trim().toUpperCase();
       const bankPayments = payments.filter(p => {
         const pBankNorm = p.bank.trim().toUpperCase();
         return pBankNorm === bankNorm || (bankNorm === 'CBE' && pBankNorm.includes('COMMERCIAL BANK'));
       });
 
-      // Filter payments that are not duplicate for amounts
-      const nonDuplicatePayments = bankPayments.filter(p => !p.isDuplicate);
+      const nonDuplicatePayments = bankPayments.filter(p => !p.isDuplicate && p.category !== 'alert');
 
       let receivedCentsThisMonth = 0;
       let sentCentsThisMonth = 0;
@@ -606,25 +822,23 @@ class DatabaseService {
       const receivedThisMonth = receivedCentsThisMonth / 100;
       const sentThisMonth = sentCentsThisMonth / 100;
 
-      // Check if latest SMS contains explicit "current balance" (Telebirr ቀሪ ሂሳብ too)
       const sortedByTimeDesc = [...bankPayments].sort((a, b) => b.timestamp - a.timestamp);
-      const latestSmsWithBalance = sortedByTimeDesc.find(p => p.extractedBalance !== undefined && p.extractedBalance !== null);
+      const latestSmsWithBalance = sortedByTimeDesc.find(
+        p => p.extractedBalance !== undefined && p.extractedBalance !== null && p.category !== 'alert'
+      );
 
       let currentBalance = 0;
       let hasSyncedBalance = false;
       const openingBal = openingBalances[base.bank] ?? openingBalances[base.name];
 
       if (latestSmsWithBalance && latestSmsWithBalance.extractedBalance !== undefined) {
-        // True balance from latest bank SMS (CBE or Telebirr ቀሪ ሂሳብ)
         currentBalance = latestSmsWithBalance.extractedBalance;
         hasSyncedBalance = true;
       } else if (openingBal !== undefined) {
-        // Opening balance + received - sent (calculated in integer cents)
         const openCents = Math.round(openingBal * 100);
         currentBalance = (openCents + totalReceivedCents - totalSentCents) / 100;
         hasSyncedBalance = true;
       } else {
-        // No explicit balance and no opening balance set yet
         currentBalance = (totalReceivedCents - totalSentCents) / 100;
         hasSyncedBalance = false;
       }
@@ -704,7 +918,14 @@ class DatabaseService {
     return newRecord;
   }
 
-  // Monthly Budget Management (2026)
+  public async deleteWithdrawal(id: string): Promise<void> {
+    const withdrawals = await this.getAllWithdrawals();
+    const filtered = withdrawals.filter(w => w.id !== id);
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.WITHDRAWALS, JSON.stringify(filtered));
+    } catch {}
+  }
+
   public async getMonthlyBudgets(): Promise<MonthlyBudget[]> {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.BUDGETS);
@@ -714,26 +935,24 @@ class DatabaseService {
   }
 
   public async getMonthlyBudget(monthStr?: string): Promise<MonthlyBudget> {
-    const targetMonth = monthStr || new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+    const targetMonth = monthStr || new Date().toISOString().slice(0, 7);
     const budgets = await this.getMonthlyBudgets();
     const existing = budgets.find(b => b.month === targetMonth);
     if (existing) return existing;
 
-    // Default starting monthly budget: 50,000 ETB
-    const defaultBudget: MonthlyBudget = {
+    return {
       id: `budget-${targetMonth}`,
       month: targetMonth,
       overallLimit: 50000,
       categoryLimits: {
-        'Transfer': 25000,
-        'Supplies': 12000,
-        'Rent': 8000,
-        'Airtime': 3000,
-        'Personal': 2000,
+        Transfer: 25000,
+        Supplies: 12000,
+        Rent: 8000,
+        Airtime: 3000,
+        Personal: 2000,
       },
       updatedAt: Date.now(),
     };
-    return defaultBudget;
   }
 
   public async saveMonthlyBudget(budget: MonthlyBudget): Promise<void> {
@@ -755,41 +974,54 @@ class DatabaseService {
 
   public async exportPaymentsCsv(): Promise<string> {
     const list = await this.getAllPayments(true);
-    // Requirement E5: UTF-8 BOM (\uFEFF) so Excel opens Amharic correctly
     const header = [
       'Date',
+      'Time',
+      'Timestamp (ms)',
       'Bank',
+      'Sender',
       'Direction',
       'Amount (ETB)',
+      'Fee (ETB)',
       'Counterparty',
       'Category',
       'Tag',
       'Note',
       'Ref/FT',
+      'Receipt URL',
       'Balance',
-      'Server status',
+      'Sync Status',
+      'Server Ignored',
       'Raw SMS',
     ];
 
     const rows = list.map(p => {
-      const direction = p.type === 'received' ? 'Received' : 'Sent';
+      const d = new Date(p.timestamp);
+      const direction = p.category === 'alert' ? 'Alert' : p.type === 'received' ? 'Received' : p.type === 'sent' ? 'Sent' : 'Unknown';
       const ref = p.ftNumber || p.v2Code || p.reference || '';
       const balanceStr = p.balance !== undefined ? p.balance.toFixed(2) : '';
-      const serverStatus = p.serverResult?.status || (p.syncStatus === 'sent' ? 'Saved' : p.syncStatus === 'pending' ? 'Pending' : 'Failed');
-      const category = p.category ? p.category.toUpperCase() : (p.type === 'received' ? 'RECEIVED' : 'TRANSFER');
+      const feeStr = p.fee !== undefined ? p.fee.toFixed(2) : '';
+      const serverStatus = p.serverResult?.status || (p.syncStatus === 'sent' ? 'Synced' : p.syncStatus === 'local' ? 'Local' : p.syncStatus);
+      const category = p.category ? p.category.toUpperCase() : 'TRANSFER';
 
       return [
-        `"${p.date}"`,
+        `"${d.toISOString().slice(0, 10)}"`,
+        `"${d.toTimeString().slice(0, 8)}"`,
+        p.timestamp,
         `"${p.bank}"`,
+        `"${p.senderAddress || ''}"`,
         `"${direction}"`,
         p.amount.toFixed(2),
+        `"${feeStr}"`,
         `"${(p.counterparty || '').replace(/"/g, '""')}"`,
         `"${category}"`,
         `"${(p.tag || '').replace(/"/g, '""')}"`,
         `"${(p.note || '').replace(/"/g, '""')}"`,
         `"${ref.replace(/"/g, '""')}"`,
+        `"${(p.receiptUrl || '').replace(/"/g, '""')}"`,
         `"${balanceStr}"`,
         `"${serverStatus}"`,
+        p.serverIgnored ? 'YES' : 'NO',
         `"${p.rawMessage.replace(/"/g, '""')}"`,
       ].join(',');
     });
@@ -798,7 +1030,18 @@ class DatabaseService {
   }
 
   public async exportFullBackupJson(includeSecretKey: boolean = false): Promise<string> {
-    const [messages, serverResults, openingBalances, overrides, senderBankMap, counterpartyTags, withdrawals, settings, allPayments] = await Promise.all([
+    const [
+      messages,
+      serverResults,
+      openingBalances,
+      overrides,
+      senderBankMap,
+      counterpartyTags,
+      withdrawals,
+      settings,
+      allPayments,
+      budgets,
+    ] = await Promise.all([
       getNativeMessages(),
       getNativeServerResults(),
       getNativeOpeningBalances(),
@@ -808,18 +1051,26 @@ class DatabaseService {
       this.getAllWithdrawals(),
       this.getSettings(),
       this.getAllPayments(true),
+      this.getMonthlyBudgets(),
     ]);
 
     let customAccounts: any[] = [];
+    let hiddenBanks: string[] = [];
+    let archivedAccounts: string[] = [];
+    let accountOrder: string[] = [];
     try {
-      const stored = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
-      if (stored) customAccounts = JSON.parse(stored);
+      const ca = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
+      if (ca) customAccounts = JSON.parse(ca);
+      hiddenBanks = this.getHiddenBankIds();
+      archivedAccounts = this.getArchivedBankIds();
+      const ao = localStorage.getItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER);
+      if (ao) accountOrder = JSON.parse(ao);
     } catch {}
 
     let totalReceivedCents = 0;
     let totalSentCents = 0;
     for (const p of allPayments) {
-      if (p.isDuplicate || p.isHidden) continue;
+      if (p.isDuplicate || p.isHidden || p.category === 'alert') continue;
       const c = p.amountCents ?? Math.round(p.amount * 100);
       if (p.type === 'received') totalReceivedCents += c;
       else if (p.type === 'sent') totalSentCents += c;
@@ -828,8 +1079,8 @@ class DatabaseService {
     const now = new Date();
     const backup = {
       app: 'Ak Finance',
-      version: 4,
-      appVersion: '2.0.0',
+      version: 5,
+      appVersion: '3.0.0',
       exportedAt: now.toISOString(),
       exportedAtISO: now.toISOString(),
       exportedAtLocal: now.toLocaleString('en-US', {
@@ -850,15 +1101,15 @@ class DatabaseService {
       },
       stats: {
         paymentsCount: messages.length || allPayments.length,
-        banksCount: Object.keys(openingBalances).length || 5,
+        banksCount: customAccounts.length + 5,
         tagsCount: Object.keys(counterpartyTags).length,
+        withdrawalsCount: withdrawals.length,
+        budgetsCount: budgets.length,
       },
       settings: {
         ...settings,
-        // Requirement E3: Secret key off by default; replace with "" if not requested
-        secretKey: includeSecretKey ? (settings.secretKey || '') : '',
+        secretKey: includeSecretKey ? settings.secretKey || '' : '',
       },
-      // Real-time detailed parsed transactions with all fields
       payments: allPayments.map(p => ({
         id: p.id,
         sender: p.senderAddress,
@@ -869,15 +1120,19 @@ class DatabaseService {
         direction: p.type,
         amount: p.amount,
         amountFormatted: p.amount.toFixed(2),
+        fee: p.fee,
         currency: p.currency || 'ETB',
         counterparty: p.counterparty || '',
         category: p.category,
         reference: p.reference,
         ftNumber: p.ftNumber,
         v2Code: p.v2Code,
+        receiptUrl: p.receiptUrl,
         balance: p.balance,
         extractedBalance: p.extractedBalance,
-        serverStatus: p.serverResult?.status || (p.syncStatus === 'sent' ? 'Saved' : p.syncStatus === 'pending' ? 'Pending' : 'Failed'),
+        syncStatus: p.syncStatus,
+        serverStatus: p.serverResult?.status || (p.syncStatus === 'sent' ? 'Saved' : p.syncStatus === 'local' ? 'Local' : 'Pending'),
+        serverIgnored: Boolean(p.serverIgnored),
         serverResult: p.serverResult || null,
         tag: p.tag || '',
         note: p.note || '',
@@ -885,7 +1140,6 @@ class DatabaseService {
         isHidden: Boolean(p.isHidden),
         isOverridden: Boolean(p.isOverridden),
       })),
-      // Raw SQLite tables for native database restores
       messages,
       serverResults,
       openingBalances,
@@ -894,7 +1148,11 @@ class DatabaseService {
       counterpartyTags,
       customAccounts,
       withdrawals,
-      budgets: await this.getMonthlyBudgets(),
+      budgets,
+      hiddenBanks,
+      archivedAccounts,
+      accountOrder,
+      uiPrefs: this.getUiPrefs(),
     };
 
     return JSON.stringify(backup, null, 2);
@@ -904,6 +1162,10 @@ class DatabaseService {
     valid: boolean;
     version?: number;
     paymentsCount: number;
+    sentCount: number;
+    localCount: number;
+    pendingOrFailedCount: number;
+    serverIgnoredCount: number;
     banksCount: number;
     tagsCount: number;
     hasSecretKey: boolean;
@@ -913,16 +1175,30 @@ class DatabaseService {
     try {
       const data = JSON.parse(jsonString);
       if (!data || typeof data !== 'object') {
-        return { valid: false, paymentsCount: 0, banksCount: 0, tagsCount: 0, hasSecretKey: false, error: 'File is not a valid JSON object.' };
+        return {
+          valid: false,
+          paymentsCount: 0,
+          sentCount: 0,
+          localCount: 0,
+          pendingOrFailedCount: 0,
+          serverIgnoredCount: 0,
+          banksCount: 0,
+          tagsCount: 0,
+          hasSecretKey: false,
+          error: 'File is not a valid JSON object.',
+        };
       }
 
       const version = data.version || 1;
-      // Requirement E4: Check schema version, reject unknown future versions
-      if (typeof version === 'number' && version > 4) {
+      if (typeof version === 'number' && version > 5) {
         return {
           valid: false,
           version,
           paymentsCount: 0,
+          sentCount: 0,
+          localCount: 0,
+          pendingOrFailedCount: 0,
+          serverIgnoredCount: 0,
           banksCount: 0,
           tagsCount: 0,
           hasSecretKey: false,
@@ -930,21 +1206,63 @@ class DatabaseService {
         };
       }
 
-      const paymentsCount = Array.isArray(data.payments) && data.payments.length > 0
-        ? data.payments.length
-        : (Array.isArray(data.messages) ? data.messages.length : 0);
-      const banksCount = data.openingBalances && typeof data.openingBalances === 'object'
-        ? Object.keys(data.openingBalances).length
-        : (data.senderBankMap ? Object.keys(data.senderBankMap).length : 5);
-      const tagsCount = data.counterpartyTags && typeof data.counterpartyTags === 'object'
-        ? Object.keys(data.counterpartyTags).length
-        : 0;
+      const rawRecords: any[] =
+        Array.isArray(data.messages) && data.messages.length > 0
+          ? data.messages
+          : Array.isArray(data.payments)
+            ? data.payments
+            : [];
+
+      const paymentsCount = rawRecords.length;
+      let sentCount = 0;
+      let localCount = 0;
+      let pendingOrFailedCount = 0;
+
+      for (const item of rawRecords) {
+        const st = item?.status || item?.syncStatus || 'local';
+        if (st === 'sent') sentCount++;
+        else if (st === 'local') localCount++;
+        else if (st === 'pending' || st === 'failed') pendingOrFailedCount++;
+        else localCount++;
+      }
+
+      let serverIgnoredCount = 0;
+      if (data.serverResults && typeof data.serverResults === 'object') {
+        for (const sr of Object.values(data.serverResults as Record<string, any>)) {
+          if (!sr) continue;
+          if (
+            sr.status === 'Ignored' ||
+            (sr.reason && /not\s*a\s*payment|not\s*financial|ignored|unsupported/i.test(String(sr.reason)))
+          ) {
+            serverIgnoredCount++;
+          }
+        }
+      } else if (Array.isArray(data.payments)) {
+        serverIgnoredCount = data.payments.filter(
+          (p: any) => p?.serverIgnored || p?.serverResult?.status === 'Ignored'
+        ).length;
+      }
+
+      const banksCount =
+        data.openingBalances && typeof data.openingBalances === 'object'
+          ? Object.keys(data.openingBalances).length
+          : data.senderBankMap
+            ? Object.keys(data.senderBankMap).length
+            : 5;
+      const tagsCount =
+        data.counterpartyTags && typeof data.counterpartyTags === 'object'
+          ? Object.keys(data.counterpartyTags).length
+          : 0;
       const hasSecretKey = Boolean(data.settings && data.settings.secretKey && data.settings.secretKey.trim().length > 0);
 
       return {
         valid: true,
         version,
         paymentsCount,
+        sentCount,
+        localCount,
+        pendingOrFailedCount,
+        serverIgnoredCount,
         banksCount,
         tagsCount,
         hasSecretKey,
@@ -954,6 +1272,10 @@ class DatabaseService {
       return {
         valid: false,
         paymentsCount: 0,
+        sentCount: 0,
+        localCount: 0,
+        pendingOrFailedCount: 0,
+        serverIgnoredCount: 0,
         banksCount: 0,
         tagsCount: 0,
         hasSecretKey: false,
@@ -965,106 +1287,232 @@ class DatabaseService {
   public async importFullBackupJson(
     jsonString: string,
     mode: 'merge' | 'replace' = 'merge'
-  ): Promise<{ success: boolean; count: number; banksCount: number; tagsCount: number; error?: string }> {
+  ): Promise<{ success: boolean; count: number; localCount: number; banksCount: number; tagsCount: number; error?: string }> {
     const inspection = this.inspectBackupJson(jsonString);
     if (!inspection.valid || !inspection.data) {
-      return { success: false, count: 0, banksCount: 0, tagsCount: 0, error: inspection.error || 'Invalid backup file.' };
+      return {
+        success: false,
+        count: 0,
+        localCount: 0,
+        banksCount: 0,
+        tagsCount: 0,
+        error: inspection.error || 'Invalid backup file.',
+      };
     }
 
     const data = inspection.data;
     let restoredPaymentsCount = 0;
 
     try {
-      // Safe update & restore: auto snapshot current state before executing any changes
+      // Safety snapshot before mutating anything
       try {
         const safetySnapshot = await this.exportFullBackupJson(true);
         localStorage.setItem('ak_finance_safety_snapshot', safetySnapshot);
         localStorage.setItem('ak_finance_safety_snapshot_time', new Date().toISOString());
       } catch {}
 
-      // 1. Opening Balances
-      if (data.openingBalances && typeof data.openingBalances === 'object') {
-        for (const [bank, amount] of Object.entries(data.openingBalances)) {
-          if (typeof amount === 'number') {
-            await this.saveOpeningBalance(bank, amount);
+      if (mode === 'replace') {
+        await clearAllNativeState();
+        try {
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.HIDDEN_BANKS);
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS);
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER);
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.WITHDRAWALS);
+          localStorage.removeItem(LOCAL_STORAGE_KEYS.BUDGETS);
+        } catch {}
+      }
+
+      // 1. Messages FIRST (preserve exact original IDs, timestamps & statuses without altering local/sent)
+      const msgSource: Array<{
+        id?: number;
+        sender: string;
+        body: string;
+        ts?: number;
+        status?: 'sent' | 'pending' | 'failed' | 'local';
+        tries?: number;
+        err?: string | null;
+        code?: number;
+      }> =
+        Array.isArray(data.messages) && data.messages.length > 0
+          ? data.messages
+          : Array.isArray(data.payments) && data.payments.length > 0
+            ? data.payments.map((p: any) => ({
+                id: Number(p.id) || undefined,
+                sender: p.sender || 'UNKNOWN',
+                body: p.body || p.rawMessage || '',
+                ts: p.timestamp || undefined,
+                status: p.syncStatus || 'local',
+              }))
+            : [];
+
+      let idRemap: Record<string, number> = {};
+      if (msgSource.length > 0) {
+        const batchRes = await importNativeMessagesBatch(msgSource, mode);
+        restoredPaymentsCount = batchRes.importedCount;
+        idRemap = batchRes.idRemap;
+      }
+
+      // 2. Server Results (mapped with idRemap so each result stays linked to its exact message)
+      if (data.serverResults && typeof data.serverResults === 'object') {
+        await saveNativeServerResultsBatch(data.serverResults, mode, idRemap);
+      } else if (Array.isArray(data.payments)) {
+        const fallbackResults: Record<string, any> = {};
+        for (const p of data.payments) {
+          if (p?.id && p?.serverResult) {
+            fallbackResults[String(p.id)] = { ...p.serverResult, smsId: Number(p.id) || p.id };
           }
+        }
+        if (Object.keys(fallbackResults).length > 0) {
+          await saveNativeServerResultsBatch(fallbackResults, mode, idRemap);
         }
       }
 
-      // 2. Sender Bank Map
-      if (data.senderBankMap && typeof data.senderBankMap === 'object') {
-        for (const [sender, bankName] of Object.entries(data.senderBankMap)) {
-          if (typeof bankName === 'string') {
-            await this.saveSenderBankMapping(sender, bankName);
-          }
-        }
-      }
-
-      // 3. Counterparty Tags
-      if (data.counterpartyTags && typeof data.counterpartyTags === 'object') {
-        for (const [cp, tg] of Object.entries(data.counterpartyTags)) {
-          if (typeof tg === 'string') {
-            await this.saveCounterpartyTag(cp, tg);
-          }
-        }
-      }
-
-      // 4. Overrides
+      // 3. Overrides (custom counterparties, tags, notes, hidden flags, categories, references)
       if (data.overrides && typeof data.overrides === 'object') {
-        for (const [smsId, ov] of Object.entries(data.overrides as Record<string, any>)) {
-          if (ov && typeof ov === 'object') {
-            await this.saveSmsOverride(smsId, {
-              counterparty: ov.counterparty,
-              direction: ov.direction,
-              note: ov.note,
-              tag: ov.tag,
-              isHidden: !!ov.isHidden,
-            });
+        await saveNativeSmsOverridesBatch(data.overrides, mode, idRemap);
+      } else if (Array.isArray(data.payments)) {
+        const fallbackOverrides: Record<string, any> = {};
+        for (const p of data.payments) {
+          if (p?.id && (p.isOverridden || p.isHidden || p.tag || p.note)) {
+            fallbackOverrides[String(p.id)] = {
+              counterparty: p.counterparty ?? null,
+              direction: p.direction ?? null,
+              note: p.note || '',
+              tag: p.tag || '',
+              isHidden: !!p.isHidden,
+              reference: p.reference,
+              category: p.category,
+            };
           }
         }
-      }
-
-      // 5. Settings
-      if (data.settings && typeof data.settings === 'object') {
-        const currentSettings = await this.getSettings();
-        const settingsToSave: Partial<AppSettings> = {
-          serverUrl: data.settings.serverUrl || currentSettings.serverUrl,
-          httpMethod: data.settings.httpMethod || currentSettings.httpMethod,
-          retryIntervalSeconds: data.settings.retryIntervalSeconds || currentSettings.retryIntervalSeconds,
-          mode: data.settings.mode || currentSettings.mode,
-          allowedSenders: Array.isArray(data.settings.allowedSenders) ? data.settings.allowedSenders : currentSettings.allowedSenders,
-        };
-
-        // If backup contained a non-empty secretKey, or if in replace mode and key is present
-        if (data.settings.secretKey && data.settings.secretKey.trim().length > 0) {
-          settingsToSave.secretKey = data.settings.secretKey;
-        } else if (mode === 'replace' && (!data.settings.secretKey || data.settings.secretKey === '')) {
-          // If backup omitted secret key, preserve existing local key to prevent accidental key wipeout
-          settingsToSave.secretKey = currentSettings.secretKey;
+        if (Object.keys(fallbackOverrides).length > 0) {
+          await saveNativeSmsOverridesBatch(fallbackOverrides, mode, idRemap);
         }
-
-        await this.saveSettings(settingsToSave);
       }
 
-      // 6. Custom Accounts & Withdrawals
+      // 4. Opening Balances, Sender Bank Map & Counterparty Tags
+      if (data.openingBalances && typeof data.openingBalances === 'object') {
+        await saveNativeOpeningBalancesBatch(data.openingBalances, mode);
+      }
+      if (data.senderBankMap && typeof data.senderBankMap === 'object') {
+        await saveNativeSenderBankMapBatch(data.senderBankMap, mode);
+      }
+      if (data.counterpartyTags && typeof data.counterpartyTags === 'object') {
+        await saveNativeCounterpartyTagsBatch(data.counterpartyTags, mode);
+      }
+
+      // 5. UI Prefs & Settings
+      if (data.uiPrefs && typeof data.uiPrefs === 'object') {
+        const existingUi = this.getUiPrefs();
+        const mergedUi = mode === 'replace' ? { ...data.uiPrefs } : { ...data.uiPrefs, ...existingUi };
+        if (mergedUi.aiModel) mergedUi.aiModel = resolveAllowedAiModel(mergedUi.aiModel);
+        this.saveUiPrefs(mergedUi);
+      }
+
+      const senderMapKeys =
+        data.senderBankMap && typeof data.senderBankMap === 'object' ? Object.keys(data.senderBankMap) : [];
+      const currentSettings = await this.getSettings();
+      const incomingSettings = data.settings && typeof data.settings === 'object' ? data.settings : {};
+
+      // CRITICAL: Never auto-sync imported local SMS records to the server.
+      // Preserve webhook URL/method/senders so the user can manually choose and sync records,
+      // while forcing mode: 'local' on import.
+      const settingsToSave: Partial<AppSettings> = {
+        serverUrl: incomingSettings.serverUrl || currentSettings.serverUrl,
+        httpMethod: incomingSettings.httpMethod || currentSettings.httpMethod,
+        retryIntervalSeconds: incomingSettings.retryIntervalSeconds || currentSettings.retryIntervalSeconds,
+        mode: 'local',
+        allowedSenders: Array.from(
+          new Set([
+            ...(currentSettings.allowedSenders || []),
+            ...(Array.isArray(incomingSettings.allowedSenders) ? incomingSettings.allowedSenders : []),
+            ...senderMapKeys,
+          ])
+        ),
+        aiEnabled: incomingSettings.aiEnabled ?? currentSettings.aiEnabled,
+        aiAutoParseUnknown: incomingSettings.aiAutoParseUnknown ?? currentSettings.aiAutoParseUnknown,
+        aiModel: resolveAllowedAiModel(incomingSettings.aiModel || currentSettings.aiModel),
+      };
+
+      if (incomingSettings.secretKey && String(incomingSettings.secretKey).trim().length > 0) {
+        settingsToSave.secretKey = incomingSettings.secretKey;
+      } else if (mode === 'replace') {
+        settingsToSave.secretKey = currentSettings.secretKey;
+      }
+
+      await this.saveSettings(settingsToSave);
+      try {
+        localStorage.removeItem('ak_settings_draft_v3');
+      } catch {}
+
+      // 6. Custom Accounts, Hidden Banks, Archived Accounts, Account Order
       if (Array.isArray(data.customAccounts)) {
         try {
-          localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(data.customAccounts));
+          if (mode === 'replace') {
+            localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(data.customAccounts));
+          } else {
+            const existingRaw = localStorage.getItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS);
+            const existing: Account[] = existingRaw ? JSON.parse(existingRaw) : [];
+            const accMap = new Map<string, Account>();
+            for (const a of existing) accMap.set(a.id, a);
+            for (const a of data.customAccounts) {
+              if (a && a.id && !accMap.has(a.id)) accMap.set(a.id, a);
+            }
+            localStorage.setItem(LOCAL_STORAGE_KEYS.CUSTOM_ACCOUNTS, JSON.stringify(Array.from(accMap.values())));
+          }
         } catch {}
       }
 
+      if (Array.isArray(data.hiddenBanks)) {
+        try {
+          const merged =
+            mode === 'replace' ? data.hiddenBanks : Array.from(new Set([...this.getHiddenBankIds(), ...data.hiddenBanks]));
+          localStorage.setItem(LOCAL_STORAGE_KEYS.HIDDEN_BANKS, JSON.stringify(merged));
+        } catch {}
+      }
+
+      if (Array.isArray(data.archivedAccounts)) {
+        try {
+          const merged =
+            mode === 'replace'
+              ? data.archivedAccounts
+              : Array.from(new Set([...this.getArchivedBankIds(), ...data.archivedAccounts]));
+          localStorage.setItem(LOCAL_STORAGE_KEYS.ARCHIVED_ACCOUNTS, JSON.stringify(merged));
+        } catch {}
+      }
+
+      if (Array.isArray(data.accountOrder)) {
+        try {
+          localStorage.setItem(LOCAL_STORAGE_KEYS.ACCOUNT_ORDER, JSON.stringify(data.accountOrder));
+        } catch {}
+      }
+
+      // 7. Withdrawals (merge or replace without duplicates)
       if (Array.isArray(data.withdrawals)) {
         try {
-          localStorage.setItem(LOCAL_STORAGE_KEYS.WITHDRAWALS, JSON.stringify(data.withdrawals));
+          if (mode === 'replace') {
+            localStorage.setItem(LOCAL_STORAGE_KEYS.WITHDRAWALS, JSON.stringify(data.withdrawals));
+          } else {
+            const currentW = await this.getAllWithdrawals();
+            const wMap = new Map<string, WithdrawalRecord>();
+            for (const w of currentW) wMap.set(w.id, w);
+            for (const w of data.withdrawals) {
+              if (w && w.id && !wMap.has(w.id)) wMap.set(w.id, w);
+            }
+            localStorage.setItem(LOCAL_STORAGE_KEYS.WITHDRAWALS, JSON.stringify(Array.from(wMap.values())));
+          }
         } catch {}
       }
 
-      // 7. Monthly Budgets (2026): safely merged without deleting existing budgets
+      // 8. Monthly Budgets
       if (Array.isArray(data.budgets)) {
         try {
           const currentBudgets = await this.getMonthlyBudgets();
           const budgetMap = new Map<string, MonthlyBudget>();
-          for (const b of currentBudgets) budgetMap.set(b.month, b);
+          if (mode !== 'replace') {
+            for (const b of currentBudgets) budgetMap.set(b.month, b);
+          }
           for (const b of data.budgets) {
             if (b && b.month && typeof b.overallLimit === 'number') {
               if (mode === 'replace' || !budgetMap.has(b.month)) {
@@ -1076,42 +1524,10 @@ class DatabaseService {
         } catch {}
       }
 
-      // 8. Messages: Requirement E4 "Merge" adds new rows without overwriting existing (skip duplicates)
-      const msgSource: Array<{ sender: string; body: string }> = 
-        (Array.isArray(data.messages) && data.messages.length > 0)
-          ? data.messages
-          : (Array.isArray(data.payments) && data.payments.length > 0)
-            ? data.payments.map((p: any) => ({ sender: p.sender || 'UNKNOWN', body: p.body || p.rawMessage || '' }))
-            : [];
-
-      if (msgSource.length > 0) {
-        const existingMessages = await getNativeMessages();
-
-        // Create deduplication set for fast lookup
-        const existingKeySet = new Set<string>();
-        for (const em of existingMessages) {
-          const bodyNorm = (em.body || '').trim();
-          existingKeySet.add(`${(em.sender || '').toLowerCase()}|${bodyNorm}`);
-        }
-
-        for (const m of msgSource) {
-          if (!m || !m.sender || !m.body) continue;
-          const key = `${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}`;
-
-          if (mode === 'merge' && existingKeySet.has(key)) {
-            // Duplicate row, skip
-            continue;
-          }
-
-          await this.insertTestSms(m.sender, m.body);
-          existingKeySet.add(key);
-          restoredPaymentsCount++;
-        }
-      }
-
       return {
         success: true,
         count: restoredPaymentsCount || inspection.paymentsCount,
+        localCount: inspection.localCount,
         banksCount: inspection.banksCount,
         tagsCount: inspection.tagsCount,
       };
@@ -1119,6 +1535,7 @@ class DatabaseService {
       return {
         success: false,
         count: 0,
+        localCount: 0,
         banksCount: 0,
         tagsCount: 0,
         error: e?.message || 'Failed restoring backup data',

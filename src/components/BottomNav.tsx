@@ -1,62 +1,66 @@
 import React from 'react';
-import { Home, BarChart2, Sparkles, Layers, CreditCard } from 'lucide-react';
+import { Home, BarChart2, Sparkles, Building2, ListOrdered } from 'lucide-react';
 import { translations } from '../utils/i18n.ts';
 import { Language } from '../types/index.ts';
 
-export type TabId = 'home' | 'insights' | 'ai' | 'organize' | 'payments';
+export type TabId = 'home' | 'payments' | 'insights' | 'ai' | 'organize';
 
 interface BottomNavProps {
   currentTab: TabId;
   onSelectTab: (tab: TabId) => void;
   language: Language;
-  pendingCount: number;
+  attentionCount: number;
 }
 
 export const BottomNav: React.FC<BottomNavProps> = ({
   currentTab,
   onSelectTab,
   language,
-  pendingCount,
+  attentionCount,
 }) => {
   const t = translations[language];
 
   const tabs: { id: TabId; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { id: 'home', label: t.navHome, icon: <Home size={20} /> },
-    { id: 'insights', label: t.navInsights, icon: <BarChart2 size={20} /> },
-    { id: 'ai', label: t.navAi, icon: <Sparkles size={20} /> },
-    { id: 'organize', label: t.navOrganize, icon: <Layers size={20} /> },
-    { id: 'payments', label: t.navPayments, icon: <CreditCard size={20} />, badge: pendingCount > 0 ? pendingCount : undefined },
+    { id: 'home', label: t.navHome, icon: <Home size={19} /> },
+    {
+      id: 'payments',
+      label: t.navPayments,
+      icon: <ListOrdered size={19} />,
+      badge: attentionCount > 0 ? attentionCount : undefined,
+    },
+    { id: 'insights', label: t.navInsights, icon: <BarChart2 size={19} /> },
+    { id: 'ai', label: t.navAi, icon: <Sparkles size={19} /> },
+    { id: 'organize', label: t.navOrganize, icon: <Building2 size={19} /> },
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 px-2 py-1.5 shadow-lg">
-      <div className="max-w-md mx-auto flex items-center justify-around">
+    <nav
+      aria-label="Mobile navigation"
+      className="lg:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-white/95 backdrop-blur-md border-t border-slate-200 px-1"
+    >
+      <div className="max-w-lg mx-auto h-full grid grid-cols-5 items-center">
         {tabs.map(tab => {
           const isActive = currentTab === tab.id;
           return (
             <button
               key={tab.id}
+              type="button"
               onClick={() => onSelectTab(tab.id)}
-              className={`flex-1 py-1.5 px-1 flex flex-col items-center justify-center relative transition-all duration-150 active:scale-95 ${
-                isActive ? 'text-[#14503F]' : 'text-slate-400 hover:text-slate-600'
+              className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 transition-colors whitespace-nowrap ${
+                isActive ? 'text-[#0F4C3A]' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               <div className="relative">
                 {tab.icon}
                 {tab.badge && (
-                  <span className="absolute -top-1.5 -right-2 min-w-[15px] h-[15px] rounded-full bg-amber-500 text-white text-[9px] font-bold flex items-center justify-center px-0.5">
-                    {tab.badge}
+                  <span className="absolute -top-1.5 -right-2.5 min-w-[15px] h-[15px] rounded-full bg-amber-600 text-white text-[9px] font-bold flex items-center justify-center px-1 tabular-nums">
+                    {tab.badge > 99 ? '99+' : tab.badge}
                   </span>
                 )}
               </div>
-              <span className={`text-[10px] font-semibold mt-1 font-['Poppins',sans-serif] ${
-                isActive ? 'text-[#14503F] font-bold' : 'text-slate-400'
-              }`}>
+              <span className={`text-[10.5px] leading-none ${isActive ? 'font-bold' : 'font-medium'}`}>
                 {tab.label}
               </span>
-              {isActive && (
-                <span className="w-1.5 h-1.5 rounded-full bg-[#14503F] mt-0.5" />
-              )}
             </button>
           );
         })}

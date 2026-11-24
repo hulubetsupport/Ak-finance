@@ -1,12 +1,11 @@
 import React, { useEffect, useRef } from 'react';
-import { 
-  Settings, 
-  Shield, 
-  Database, 
-  CheckCircle, 
-  HelpCircle, 
+import {
+  Settings,
+  Shield,
+  Database,
+  CheckCircle2,
+  HelpCircle,
   X,
-  Lock
 } from 'lucide-react';
 
 interface HeaderMenuProps {
@@ -49,85 +48,73 @@ export const HeaderMenu: React.FC<HeaderMenuProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-2xs flex justify-end p-3 animate-in fade-in">
-      <div 
+    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-2xs flex justify-end p-3">
+      <div
         ref={menuRef}
-        className="bg-white rounded-3xl w-64 shadow-2xl border border-slate-100 p-2 space-y-1 mt-12 mr-1 animate-in slide-in-from-top-4 duration-200"
+        className="bg-white rounded-2xl w-64 border border-slate-200 shadow-xl p-2 space-y-1 mt-12 h-fit"
       >
         <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
-          <span className="text-xs font-black text-[#14503F] font-['Poppins',sans-serif] tracking-wider uppercase">
-            Menu
-          </span>
-          <button 
+          <span className="text-xs font-semibold text-slate-900">Tools &amp; Preferences</span>
+          <button
+            type="button"
             onClick={onClose}
-            className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
+            aria-label="Close menu"
+            className="w-8 h-8 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800"
           >
-            <X size={13} />
+            <X size={14} />
           </button>
         </div>
 
         <button
-          onClick={() => { onClose(); onOpenSettings(); }}
-          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl text-xs font-bold text-slate-700 hover:bg-emerald-50/70 hover:text-[#14503F] transition-all text-left"
-        >
-          <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-            <Settings size={14} />
-          </div>
-          <span>Settings</span>
-        </button>
-
-        <button
-          onClick={() => { onClose(); onOpenSecurity(); }}
-          className="w-full flex items-center justify-between px-3 py-2.5 rounded-2xl text-xs font-bold text-slate-700 hover:bg-emerald-50/70 hover:text-[#14503F] transition-all text-left"
-        >
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-              <Shield size={14} />
-            </div>
-            <span>App Security</span>
-          </div>
-          {isPinEnabled ? (
-            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
-              <Lock size={10} /> PIN
-            </span>
-          ) : (
-            <span className="text-[10px] text-slate-400">Off</span>
-          )}
-        </button>
-
-        <button
-          onClick={() => { onClose(); onOpenVerify(); }}
-          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl text-xs font-bold text-slate-700 hover:bg-emerald-50/70 hover:text-[#14503F] transition-all text-left"
-        >
-          <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-            <CheckCircle size={14} />
-          </div>
-          <div>
-            <span>Local Payment Verify</span>
-            <span className="block text-[9.5px] font-normal text-slate-400">Test Ref & Amount</span>
-          </div>
-        </button>
-
-        <button
+          type="button"
           onClick={() => { onClose(); onOpenBackup(); }}
-          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl text-xs font-bold text-slate-700 hover:bg-emerald-50/70 hover:text-[#14503F] transition-all text-left"
+          className="w-full min-h-[42px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors text-left"
         >
-          <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-            <Database size={14} />
-          </div>
-          <span>Backup & Restore</span>
+          <Database size={15} className="text-[#0F4C3A]" />
+          <span>Backup, Storage &amp; Sync</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { onClose(); onOpenVerify(); }}
+          className="w-full min-h-[42px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors text-left"
+        >
+          <CheckCircle2 size={15} className="text-[#0F4C3A]" />
+          <span>Receipt &amp; Local Verify</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { onClose(); onOpenSettings(); }}
+          className="w-full min-h-[42px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors text-left"
+        >
+          <Settings size={15} className="text-slate-600" />
+          <span>Settings &amp; Sync Server</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { onClose(); onOpenSecurity(); }}
+          className="w-full min-h-[42px] flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors text-left"
+        >
+          <span className="flex items-center gap-2.5">
+            <Shield size={15} className="text-slate-600" />
+            <span>App PIN Security</span>
+          </span>
+          <span className={`text-[11px] font-mono ${isPinEnabled ? 'text-emerald-700 font-semibold' : 'text-slate-400'}`}>
+            {isPinEnabled ? 'PIN On' : 'Off'}
+          </span>
         </button>
 
         <div className="border-t border-slate-100 my-1" />
 
         <button
+          type="button"
           onClick={() => { onClose(); onOpenAbout(); }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-2xl text-xs font-bold text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-all text-left"
+          className="w-full min-h-[42px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors text-left"
         >
-          <div className="w-7 h-7 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
-            <HelpCircle size={14} />
-          </div>
-          <span>About & Help</span>
+          <HelpCircle size={15} />
+          <span>About Ak Finance</span>
         </button>
       </div>
     </div>

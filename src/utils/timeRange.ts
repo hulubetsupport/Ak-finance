@@ -16,12 +16,13 @@ export function getTimeRangeWindow(
   const now = Date.now();
   const hourMs = 60 * 60 * 1000;
   const dayMs = 24 * hourMs;
+  const futureBufferEnd = now + 12 * hourMs;
 
   switch (range) {
     case '1h':
       return {
         startTime: now - hourMs,
-        endTime: now,
+        endTime: futureBufferEnd,
         bucketCount: 6,
         bucketDurationMs: 10 * 60 * 1000, // 10 min buckets
         label: 'Last 1 Hour',
@@ -29,7 +30,7 @@ export function getTimeRangeWindow(
     case '1d':
       return {
         startTime: now - dayMs,
-        endTime: now,
+        endTime: futureBufferEnd,
         bucketCount: 6,
         bucketDurationMs: 4 * hourMs, // 4 hour buckets
         label: 'Last 24 Hours',
@@ -37,7 +38,7 @@ export function getTimeRangeWindow(
     case '7d':
       return {
         startTime: now - 7 * dayMs,
-        endTime: now,
+        endTime: futureBufferEnd,
         bucketCount: 7,
         bucketDurationMs: dayMs, // 1 day buckets
         label: 'Last 7 Days',
@@ -46,7 +47,7 @@ export function getTimeRangeWindow(
       // 30 days window
       return {
         startTime: now - 30 * dayMs,
-        endTime: now,
+        endTime: futureBufferEnd,
         bucketCount: 6,
         bucketDurationMs: 5 * dayMs,
         label: 'Last 30 Days',
@@ -55,7 +56,7 @@ export function getTimeRangeWindow(
     case '1y':
       return {
         startTime: now - 365 * dayMs,
-        endTime: now,
+        endTime: futureBufferEnd,
         bucketCount: 12,
         bucketDurationMs: 30 * dayMs,
         label: 'Last 1 Year',

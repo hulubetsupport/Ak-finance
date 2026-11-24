@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { WithdrawalRecord, Account, AppSettings } from '../types/index.ts';
 import { translations } from '../utils/i18n.ts';
-import { Plus, ArrowUpRight, Calendar, User, FileText, Trash2, Check, Banknote } from 'lucide-react';
+import { Plus, ArrowUpRight, Trash2, Banknote } from 'lucide-react';
 
 interface WithdrawalsTabProps {
   withdrawals: WithdrawalRecord[];
@@ -58,91 +58,79 @@ export const WithdrawalsTab: React.FC<WithdrawalsTabProps> = ({
   };
 
   return (
-    <div className="space-y-4 pb-20">
-      {/* Header bar */}
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 pb-8">
+      <div className="flex items-center justify-between gap-2">
         <div>
-          <h2 className="text-lg font-extrabold text-slate-900 font-['Poppins',sans-serif]">
-            {t.withdrawals}
-          </h2>
-          <p className="text-xs text-slate-400">
-            {isAm ? 'የንግድ ወጪ እና የጥሬ ገንዘብ ማውጫ' : 'Record store expenses and branch cash disbursements'}
+          <h2 className="text-base font-bold text-slate-900">{t.withdrawals}</h2>
+          <p className="text-xs text-slate-500">
+            {isAm ? 'የንግድ ወጪ እና የጥሬ ገንዘብ ማውጫ' : 'Store expenses & manual cash disbursements'}
           </p>
         </div>
         <button
+          type="button"
           onClick={() => setShowModal(true)}
-          className="px-3.5 py-2 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-sm hover:bg-[#0e3b2e] active:scale-95 flex items-center gap-1.5 transition-all"
+          className="px-3.5 py-2 rounded-lg bg-[#0F4C3A] text-white text-xs font-semibold hover:bg-[#0B3B2E] flex items-center gap-1.5 whitespace-nowrap"
         >
           <Plus size={14} />
           <span>{t.recordWithdrawal}</span>
         </button>
       </div>
 
-      {/* Summary Total Card */}
-      <div className="bg-gradient-to-br from-amber-600 to-amber-800 text-white rounded-2xl p-4 shadow-sm relative overflow-hidden">
-        <div className="text-xs font-semibold text-amber-100 uppercase tracking-wider">
+      <div className="bg-[#0B3B2E] text-white rounded-xl p-4">
+        <div className="text-xs font-medium text-emerald-200 uppercase tracking-wider">
           {t.totalWithdrawn}
         </div>
-        <div className="text-2xl font-extrabold mt-1 font-['Poppins',sans-serif]">
+        <div className="text-2xl font-bold mt-1 tabular-nums">
           {settings.hideBalances ? '••••••' : `${totalWithdrawn.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB`}
         </div>
-        <div className="text-[11px] text-amber-200/80 mt-1">
-          {withdrawals.length} {isAm ? 'የተመዘገቡ ወጪዎች' : 'recorded cash out vouchers'}
+        <div className="text-xs text-emerald-200/80 mt-1">
+          {withdrawals.length} {isAm ? 'የተመዘገቡ ወጪዎች' : 'recorded vouchers'}
         </div>
       </div>
 
-      {/* List */}
       <div className="space-y-2">
         {withdrawals.length === 0 ? (
-          <div className="bg-white rounded-2xl p-8 text-center border border-dashed border-slate-200">
-            <Banknote className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+          <div className="bg-white rounded-xl p-8 text-center border border-dashed border-slate-300">
+            <Banknote className="w-9 h-9 text-slate-300 mx-auto mb-2" />
             <div className="text-sm font-bold text-slate-700">
               {isAm ? 'ምንም የወጪ መዝገብ የለም' : 'No recorded withdrawals yet'}
             </div>
-            <p className="text-xs text-slate-400 mt-1">
-              {isAm ? 'ወጪዎችን ለመመዝገብ ከላይ ያለውን ቁልፍ ይጫኑ' : 'Click "Record Withdrawal" to deduct expenses from accounts.'}
+            <p className="text-xs text-slate-500 mt-1">
+              {isAm ? 'ወጪዎችን ለመመዝገብ ከላይ ያለውን ቁልፍ ይጫኑ' : 'Click "Record Withdrawal" to log cash disbursements.'}
             </p>
           </div>
         ) : (
           withdrawals.map(w => (
             <div
               key={w.id}
-              className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs flex items-center justify-between gap-3"
+              className="bg-white rounded-xl p-3.5 border border-slate-200 flex items-center justify-between gap-3"
             >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0 border border-amber-200/60">
-                  <ArrowUpRight size={18} />
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-amber-50 text-amber-800 flex items-center justify-center shrink-0 border border-amber-200">
+                  <ArrowUpRight size={16} />
                 </div>
-                <div>
-                  <div className="text-xs font-bold text-slate-900 font-['Poppins',sans-serif]">
-                    {w.recipient}
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 truncate">{w.recipient}</div>
+                  <div className="text-[11px] text-slate-500 truncate">
+                    {w.bank} · {w.date} {w.note ? `· "${w.note}"` : ''}
                   </div>
-                  <div className="text-[11px] text-slate-500 mt-0.5">
-                    {w.bank} · {w.date}
-                  </div>
-                  {w.note && (
-                    <div className="text-[10px] text-slate-400 italic mt-0.5">
-                      "{w.note}"
-                    </div>
-                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <div className="text-right">
-                  <div className="text-sm font-extrabold text-rose-600 font-['Poppins',sans-serif]">
+                  <div className="text-sm font-bold text-rose-700 tabular-nums">
                     -{w.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ETB
                   </div>
-                  <span className="text-[10px] font-mono text-slate-400">
-                    {w.reference}
-                  </span>
+                  <span className="text-[11px] font-mono text-slate-400">{w.reference}</span>
                 </div>
                 <button
+                  type="button"
                   onClick={() => onDeleteWithdrawal(w.id)}
-                  className="w-7 h-7 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center transition-colors"
-                  title="Delete record"
+                  aria-label={`Delete withdrawal ${w.recipient}`}
+                  className="w-8 h-8 rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 flex items-center justify-center"
                 >
-                  <Trash2 size={13} />
+                  <Trash2 size={14} />
                 </button>
               </div>
             </div>
@@ -150,19 +138,16 @@ export const WithdrawalsTab: React.FC<WithdrawalsTabProps> = ({
         )}
       </div>
 
-      {/* Record Modal */}
       {showModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-3xl p-5 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto space-y-4">
-            <h3 className="text-sm font-bold text-slate-900 font-['Poppins',sans-serif] pb-2 border-b border-slate-100">
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl p-5 border border-slate-200 max-h-[90vh] overflow-y-auto space-y-4">
+            <h3 className="text-sm font-bold text-slate-900 pb-2 border-b border-slate-100">
               {t.recordWithdrawal}
             </h3>
 
             <form onSubmit={handleSubmit} className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {t.amount}
-                </label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">{t.amount}</label>
                 <input
                   type="number"
                   required
@@ -170,64 +155,56 @@ export const WithdrawalsTab: React.FC<WithdrawalsTabProps> = ({
                   placeholder="e.g. 5000"
                   value={amount}
                   onChange={e => setAmount(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F] font-bold"
+                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg font-bold tabular-nums"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {t.bankLabel}
-                </label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">{t.bankLabel}</label>
                 <select
                   value={accountId}
                   onChange={e => setAccountId(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F]"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
                 >
                   {accounts.map(acc => (
                     <option key={acc.id} value={acc.id}>
-                      {acc.name} ({acc.bank}) - Balance: {acc.balance.toLocaleString()} ETB
+                      {acc.name} ({acc.bank}) — {acc.balance.toLocaleString()} ETB
                     </option>
                   ))}
                 </select>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {t.recipient}
-                </label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">{t.recipient}</label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Branch Cashier, Supplier, Logistics"
+                  placeholder="e.g. Branch Cashier, Supplier"
                   value={recipient}
                   onChange={e => setRecipient(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F]"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {t.dateLabel}
-                </label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">{t.dateLabel}</label>
                 <input
                   type="date"
                   required
                   value={date}
                   onChange={e => setDate(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F]"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {t.note}
-                </label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">{t.note}</label>
                 <textarea
                   rows={2}
                   placeholder="Reason for cash out..."
                   value={note}
                   onChange={e => setNote(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-[#14503F]"
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
 
@@ -235,14 +212,14 @@ export const WithdrawalsTab: React.FC<WithdrawalsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="flex-1 py-2.5 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold hover:bg-slate-200"
+                  className="flex-1 py-2 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="flex-1 py-2.5 rounded-xl bg-[#14503F] text-white text-xs font-bold shadow-md hover:bg-[#0e3b2e]"
+                  className="flex-1 py-2 rounded-lg bg-[#0F4C3A] text-white text-xs font-semibold"
                 >
                   {isSubmitting ? 'Recording...' : 'Save Record'}
                 </button>

@@ -2,6 +2,7 @@ package com.akfinance.paymentdesk;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -20,6 +21,7 @@ import com.getcapacitor.BridgeActivity;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.util.HashSet;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -175,7 +177,7 @@ public class MainActivity extends BridgeActivity {
         public String getMessages() {
             try {
                 SQLiteDatabase db = Db.get(activity).getReadableDatabase();
-                Cursor q = db.rawQuery("SELECT id,sender,body,ts,status,tries,err,code FROM sms ORDER BY ts DESC LIMIT 1000", null);
+                Cursor q = db.rawQuery("SELECT id,sender,body,ts,status,tries,err,code FROM sms ORDER BY ts DESC LIMIT 50000", null);
                 JSONArray arr = new JSONArray();
                 while (q.moveToNext()) {
                     JSONObject row = new JSONObject();
@@ -330,10 +332,133 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public String importMessagesBatch(String json, String mode) {
+            JSONObject out = new JSONObject();
+            JSONObject idRemap = new JSONObject();
+            JSONArray assignedIds = new JSONArray();
+            int importedCount = 0;
+            try {
+                JSONArray arr = new JSONArray(json != null ? json : "[]");
+                boolean replaceMode = "replace".equalsIgnoreCase(mode);
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.beginTransaction();
+                try {
+                    if (replaceMode) {
+                        db.delete("sms", null, null);
+                    }
+                    HashSet<Long> usedIds = new HashSet<>();
+                    java.util.HashMap<String, Long> exactKeyToId = new java.util.HashMap<>();
+                    if (!replaceMode) {
+                        Cursor existingCursor = db.rawQuery("SELECT id, sender, body, ts FROM sms", null);
+                        while (existingCursor.moveToNext()) {
+                            long eid = existingCursor.getLong(0);
+                            String esender = existingCursor.isNull(1) ? "" : existingCursor.getString(1);
+                            String ebody = existingCursor.isNull(2) ? "" : existingCursor.getString(2);
+                            long ets = existingCursor.getLong(3);
+                            usedIds.add(eid);
+                            exactKeyToId.put(esender.toLowerCase() + "|" + ebody.trim() + "|" + ets, eid);
+                        }
+                        existingCursor.close();
+                    }
+
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject item = arr.optJSONObject(i);
+                        if (item == null) {
+                            assignedIds.put(0L);
+                            continue;
+                        }
+                        String sender = item.optString("sender", "").trim();
+                        String body = item.optString("body", "");
+                        if (sender.isEmpty() || body.trim().isEmpty()) {
+                            assignedIds.put(0L);
+                            continue;
+                        }
+
+                        long ts = item.optLong("ts", 0L);
+                        if (ts <= 0L) ts = System.currentTimeMillis();
+
+                        String key = sender.toLowerCase() + "|" + body.trim() + "|" + ts;
+                        if (!replaceMode && exactKeyToId.containsKey(key)) {
+                            Long existingId = exactKeyToId.get(key);
+                            assignedIds.put(existingId != null ? existingId : 0L);
+                            continue;
+                        }
+
+                        String status = item.optString("status", "local");
+                        if (!"sent".equals(status) && !"pending".equals(status) && !"failed".equals(status) && !"local".equals(status)) {
+                            status = "local";
+                        }
+
+                        ContentValues cv = new ContentValues();
+                        long origId = item.optLong("id", 0L);
+                        boolean hadOrigId = origId > 0L;
+                        if (hadOrigId && !usedIds.contains(origId)) {
+                            cv.put("id", origId);
+                        }
+                        cv.put("sender", sender);
+                        cv.put("body", body);
+                        cv.put("ts", ts);
+                        cv.put("status", status);
+                        cv.put("tries", item.optInt("tries", 0));
+                        if (item.isNull("err")) {
+                            cv.putNull("err");
+                        } else {
+                            cv.put("err", item.optString("err", null));
+                        }
+                        cv.put("code", item.optInt("code", 0));
+
+                        long insertedId = db.insert("sms", null, cv);
+                        if (insertedId > 0L) {
+                            usedIds.add(insertedId);
+                            exactKeyToId.put(key, insertedId);
+                            if (hadOrigId && insertedId != origId) {
+                                idRemap.put(String.valueOf(origId), insertedId);
+                            }
+                            assignedIds.put(insertedId);
+                            importedCount++;
+                        } else {
+                            assignedIds.put(0L);
+                        }
+                    }
+                    db.setTransactionSuccessful();
+                } finally {
+                    db.endTransaction();
+                }
+                out.put("importedCount", importedCount);
+                out.put("idRemap", idRemap);
+                out.put("assignedIds", assignedIds);
+            } catch (Exception e) {
+                try {
+                    out.put("importedCount", importedCount);
+                    out.put("idRemap", idRemap);
+                    out.put("assignedIds", assignedIds);
+                    out.put("error", String.valueOf(e.getMessage()));
+                } catch (Exception ignored) {}
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
         public boolean clearAll() {
             try {
                 SQLiteDatabase db = Db.get(activity).getWritableDatabase();
                 db.delete("sms", null, null);
+                db.delete("server_result", null, null);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean clearAllState() {
+            try {
+                SQLiteDatabase db = Db.get(activity).getWritableDatabase();
+                db.delete("sms", null, null);
+                db.delete("server_result", null, null);
+                db.delete("sms_overrides", null, null);
+                db.delete("opening_balances", null, null);
+                db.delete("counterparty_tags", null, null);
                 return true;
             } catch (Exception e) {
                 return false;

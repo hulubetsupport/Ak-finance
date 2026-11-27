@@ -18,6 +18,11 @@ import {
 import {
   resolveAllowedAiModel,
 } from '../constants/aiModels.ts';
+import {
+  normalizeEpochTimestamp,
+  parseAkFinanceCsvFiles,
+  CsvImportInspection,
+} from '../utils/csvImport.ts';
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import {
   DEFAULT_HULUBET_SERVER_URL,
@@ -1737,6 +1742,8 @@ class DatabaseService {
     serverIgnoredCount: number;
     banksCount: number;
     tagsCount: number;
+    minTimestamp?: number;
+    maxTimestamp?: number;
     hasSecretKey: boolean;
     error?: string;
     data?: any;
@@ -1786,13 +1793,32 @@ class DatabaseService {
       let sentCount = 0;
       let localCount = 0;
       let pendingOrFailedCount = 0;
+      let minTimestamp: number | undefined;
+      let maxTimestamp: number | undefined;
 
       for (const item of rawRecords) {
-        const st = item?.status || item?.syncStatus || 'local';
+        const srStat = String(item?.serverStatus || item?.serverResult?.status || '').toLowerCase();
+        let st = String(item?.status || item?.syncStatus || '').toLowerCase();
+        if (!st) {
+          if (srStat === 'saved' || srStat === 'duplicate' || srStat === 'ignored' || srStat === 'synced') st = 'sent';
+          else if (srStat === 'pending') st = 'pending';
+          else if (srStat === 'failed') st = 'failed';
+          else st = 'local';
+        }
         if (st === 'sent') sentCount++;
-        else if (st === 'local') localCount++;
         else if (st === 'pending' || st === 'failed') pendingOrFailedCount++;
         else localCount++;
+
+        const ts = normalizeEpochTimestamp(
+          item?.ts ?? item?.timestamp,
+          item?.dateFormatted ?? item?.date,
+          undefined,
+          item?.body || item?.rawMessage
+        );
+        if (ts > 0) {
+          if (minTimestamp === undefined || ts < minTimestamp) minTimestamp = ts;
+          if (maxTimestamp === undefined || ts > maxTimestamp) maxTimestamp = ts;
+        }
       }
 
       let serverIgnoredCount = 0;
@@ -1821,7 +1847,9 @@ class DatabaseService {
       const tagsCount =
         data.counterpartyTags && typeof data.counterpartyTags === 'object'
           ? Object.keys(data.counterpartyTags).length
-          : 0;
+          : Array.isArray(data.payments)
+            ? new Set(data.payments.map((p: any) => String(p?.tag || '').trim()).filter(Boolean)).size
+            : 0;
       const hasSecretKey = Boolean(data.settings && data.settings.secretKey && data.settings.secretKey.trim().length > 0);
 
       return {
@@ -1834,6 +1862,8 @@ class DatabaseService {
         serverIgnoredCount,
         banksCount,
         tagsCount,
+        minTimestamp,
+        maxTimestamp,
         hasSecretKey,
         data,
       };
@@ -1904,15 +1934,41 @@ class DatabaseService {
         code?: number;
       }> =
         Array.isArray(data.messages) && data.messages.length > 0
-          ? data.messages
+          ? data.messages.map((m: any) => ({
+              id: Number(m.id) || undefined,
+              sender: m.sender || 'UNKNOWN',
+              body: m.body || '',
+              ts: normalizeEpochTimestamp(m.ts ?? m.timestamp, m.dateFormatted ?? m.date, undefined, m.body),
+              status:
+                m.status === 'sent' || m.status === 'pending' || m.status === 'failed' || m.status === 'local'
+                  ? m.status
+                  : 'local',
+              tries: Number(m.tries) || 0,
+              err: m.err ?? null,
+              code: Number(m.code) || 0,
+            }))
           : Array.isArray(data.payments) && data.payments.length > 0
-            ? data.payments.map((p: any) => ({
-                id: Number(p.id) || undefined,
-                sender: p.sender || 'UNKNOWN',
-                body: p.body || p.rawMessage || '',
-                ts: p.timestamp || undefined,
-                status: p.syncStatus || 'local',
-              }))
+            ? data.payments.map((p: any) => {
+                const srStat = String(p.serverStatus || p.serverResult?.status || '').toLowerCase();
+                const derivedStatus: 'sent' | 'pending' | 'failed' | 'local' =
+                  p.syncStatus === 'sent' || p.syncStatus === 'pending' || p.syncStatus === 'failed' || p.syncStatus === 'local'
+                    ? p.syncStatus
+                    : srStat === 'saved' || srStat === 'duplicate' || srStat === 'ignored' || srStat === 'synced'
+                      ? 'sent'
+                      : 'local';
+                return {
+                  id: Number(p.id) || undefined,
+                  sender: p.sender || p.senderAddress || 'UNKNOWN',
+                  body: p.body || p.rawMessage || '',
+                  ts: normalizeEpochTimestamp(
+                    p.timestamp ?? p.ts,
+                    p.dateFormatted ?? p.date,
+                    undefined,
+                    p.body || p.rawMessage
+                  ),
+                  status: derivedStatus,
+                };
+              })
             : [];
 
       let idRemap: Record<string, number> = {};
@@ -2111,6 +2167,121 @@ class DatabaseService {
         banksCount: 0,
         tagsCount: 0,
         error: e?.message || 'Failed restoring backup data',
+      };
+    }
+  }
+
+  public inspectCsvImport(csvTexts: string[]): CsvImportInspection {
+    return parseAkFinanceCsvFiles(csvTexts);
+  }
+
+  public async importCsvFiles(
+    csvTexts: string[],
+    mode: 'merge' | 'replace' = 'merge'
+  ): Promise<{ success: boolean; count: number; localCount: number; banksCount: number; tagsCount: number; error?: string }> {
+    const inspection = this.inspectCsvImport(csvTexts);
+    if (!inspection.valid || inspection.records.length === 0) {
+      return {
+        success: false,
+        count: 0,
+        localCount: 0,
+        banksCount: 0,
+        tagsCount: 0,
+        error: inspection.error || 'No valid transactions found in CSV file.',
+      };
+    }
+
+    try {
+      try {
+        const safetySnapshot = await this.exportFullBackupJson(true);
+        localStorage.setItem('ak_finance_safety_snapshot', safetySnapshot);
+        localStorage.setItem('ak_finance_safety_snapshot_time', new Date().toISOString());
+      } catch {}
+
+      if (mode === 'replace') {
+        await clearAllNativeState();
+      }
+
+      const msgPayload = inspection.records.map(r => ({
+        id: r.id,
+        sender: r.sender,
+        body: r.body,
+        ts: r.ts,
+        status: r.status,
+      }));
+
+      const batchRes = await importNativeMessagesBatch(msgPayload, mode);
+      const overridesBatch: Record<string, any> = {};
+      const counterpartyTagsBatch: Record<string, string> = {};
+      const serverResultsBatch: Record<string, any> = {};
+      const senderBankMapBatch: Record<string, string> = {};
+
+      inspection.records.forEach((rec, idx) => {
+        const assignedId = batchRes.assignedIds[idx] || (rec.id ? batchRes.idRemap[String(rec.id)] ?? rec.id : 0);
+        if (rec.sender && rec.bank) {
+          senderBankMapBatch[rec.sender] = rec.bank;
+        }
+        if (rec.counterparty && rec.tag) {
+          counterpartyTagsBatch[rec.counterparty.trim()] = rec.tag.trim();
+        }
+        if (!assignedId) return;
+
+        const key = String(assignedId);
+        if (rec.note || rec.tag || rec.counterparty || rec.direction || rec.reference || rec.category) {
+          overridesBatch[key] = {
+            counterparty: rec.counterparty ?? null,
+            direction: rec.direction ?? null,
+            note: rec.note || '',
+            tag: rec.tag || '',
+            isHidden: false,
+            reference: rec.reference || undefined,
+            category: rec.category || undefined,
+          };
+        }
+
+        if (rec.serverStatus === 'Saved' || rec.serverStatus === 'Duplicate' || rec.serverStatus === 'Ignored') {
+          serverResultsBatch[key] = {
+            smsId: assignedId,
+            httpCode: 200,
+            status: rec.serverStatus,
+            ref: rec.reference || '',
+            reason: rec.serverIgnored ? 'Imported as server ignored' : '',
+            raw: '',
+            at: rec.ts,
+            bank: rec.bank,
+            amount: rec.amount,
+          };
+        }
+      });
+
+      if (Object.keys(senderBankMapBatch).length > 0) {
+        await saveNativeSenderBankMapBatch(senderBankMapBatch, mode);
+      }
+      if (Object.keys(counterpartyTagsBatch).length > 0) {
+        await saveNativeCounterpartyTagsBatch(counterpartyTagsBatch, mode);
+      }
+      if (Object.keys(overridesBatch).length > 0) {
+        await saveNativeSmsOverridesBatch(overridesBatch, mode);
+      }
+      if (Object.keys(serverResultsBatch).length > 0) {
+        await saveNativeServerResultsBatch(serverResultsBatch, mode);
+      }
+
+      return {
+        success: true,
+        count: batchRes.importedCount || inspection.paymentsCount,
+        localCount: inspection.localCount,
+        banksCount: inspection.banksCount,
+        tagsCount: inspection.tagsCount,
+      };
+    } catch (e: any) {
+      return {
+        success: false,
+        count: 0,
+        localCount: 0,
+        banksCount: 0,
+        tagsCount: 0,
+        error: e?.message || 'Failed importing CSV data.',
       };
     }
   }

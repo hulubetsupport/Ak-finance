@@ -50,7 +50,11 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   });
 
   const [pendingRestore, setPendingRestore] = useState<{
-    rawJson: string;
+    kind: 'json' | 'csv';
+    rawJson?: string;
+    csvTexts?: string[];
+    fileCount?: number;
+    detectedFormat?: string;
     version: number;
     paymentsCount: number;
     sentCount: number;
@@ -59,6 +63,8 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     serverIgnoredCount: number;
     banksCount: number;
     tagsCount: number;
+    minTimestamp?: number;
+    maxTimestamp?: number;
     hasSecretKey: boolean;
     exportedAt?: string;
     financialSummary?: {
@@ -72,6 +78,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const [confirmReplaceText, setConfirmReplaceText] = useState('');
   const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -94,6 +101,22 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const formatMb = (bytes?: number) => {
     if (bytes === undefined) return 'N/A';
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const formatDateRange = (minTs?: number, maxTs?: number): string | null => {
+    if (!minTs && !maxTs) return null;
+    const fmt = (ts: number) =>
+      new Date(ts).toLocaleString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    if (minTs && maxTs && minTs !== maxTs) {
+      return `${fmt(minTs)}  ->  ${fmt(maxTs)}`;
+    }
+    return fmt(minTs || maxTs!);
   };
 
   const handleRequestPersistence = async () => {
@@ -174,36 +197,71 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     }
   };
 
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const processSelectedFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
 
     setLoading(true);
     setErrorMsg(null);
+    setSuccessMsg(null);
     try {
-      const text = await file.text();
-      const inspection = db.inspectBackupJson(text);
+      const fileArray = Array.from(files);
+      const firstText = await fileArray[0].text();
+      const trimmedFirst = firstText.trim();
+      const looksLikeJson =
+        fileArray.length === 1 &&
+        (fileArray[0].name.toLowerCase().endsWith('.json') ||
+          trimmedFirst.startsWith('{') ||
+          trimmedFirst.startsWith('['));
 
-      if (!inspection.valid) {
-        setErrorMsg(inspection.error || 'Invalid backup file.');
-        return;
+      if (looksLikeJson) {
+        const inspection = db.inspectBackupJson(firstText);
+        if (!inspection.valid) {
+          setErrorMsg(inspection.error || 'Invalid backup file.');
+          return;
+        }
+        const data = inspection.data || {};
+        setPendingRestore({
+          kind: 'json',
+          rawJson: firstText,
+          version: inspection.version || 1,
+          paymentsCount: inspection.paymentsCount,
+          sentCount: inspection.sentCount,
+          localCount: inspection.localCount,
+          pendingOrFailedCount: inspection.pendingOrFailedCount,
+          serverIgnoredCount: inspection.serverIgnoredCount,
+          banksCount: inspection.banksCount,
+          tagsCount: inspection.tagsCount,
+          minTimestamp: inspection.minTimestamp,
+          maxTimestamp: inspection.maxTimestamp,
+          hasSecretKey: inspection.hasSecretKey,
+          exportedAt: data.exportedAtLocal || data.exportedAt || undefined,
+          financialSummary: data.financialSummary,
+        });
+      } else {
+        const csvTexts = await Promise.all(fileArray.map(f => f.text()));
+        const inspection = db.inspectCsvImport(csvTexts);
+        if (!inspection.valid) {
+          setErrorMsg(inspection.error || 'Invalid CSV file.');
+          return;
+        }
+        setPendingRestore({
+          kind: 'csv',
+          csvTexts,
+          fileCount: inspection.fileCount,
+          detectedFormat: inspection.detectedFormat,
+          version: 5,
+          paymentsCount: inspection.paymentsCount,
+          sentCount: inspection.sentCount,
+          localCount: inspection.localCount,
+          pendingOrFailedCount: inspection.pendingOrFailedCount,
+          serverIgnoredCount: inspection.serverIgnoredCount,
+          banksCount: inspection.banksCount,
+          tagsCount: inspection.tagsCount,
+          minTimestamp: inspection.minTimestamp,
+          maxTimestamp: inspection.maxTimestamp,
+          hasSecretKey: false,
+        });
       }
-
-      const data = inspection.data || {};
-      setPendingRestore({
-        rawJson: text,
-        version: inspection.version || 1,
-        paymentsCount: inspection.paymentsCount,
-        sentCount: inspection.sentCount,
-        localCount: inspection.localCount,
-        pendingOrFailedCount: inspection.pendingOrFailedCount,
-        serverIgnoredCount: inspection.serverIgnoredCount,
-        banksCount: inspection.banksCount,
-        tagsCount: inspection.tagsCount,
-        hasSecretKey: inspection.hasSecretKey,
-        exportedAt: data.exportedAtLocal || data.exportedAt || undefined,
-        financialSummary: data.financialSummary,
-      });
       setShowReplaceConfirm(false);
       setConfirmReplaceText('');
     } catch (err: any) {
@@ -211,7 +269,12 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     } finally {
       setLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (csvInputRef.current) csvInputRef.current.value = '';
     }
+  };
+
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await processSelectedFiles(e.target.files);
   };
 
   const handleExecuteRestore = async (mode: 'merge' | 'replace') => {
@@ -224,11 +287,16 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await db.importFullBackupJson(pendingRestore.rawJson, mode);
+      const res =
+        pendingRestore.kind === 'csv'
+          ? await db.importCsvFiles(pendingRestore.csvTexts || [], mode)
+          : await db.importFullBackupJson(pendingRestore.rawJson || '', mode);
+
       if (res.success) {
         await onDataRestored();
+        const label = pendingRestore.kind === 'csv' ? 'CSV imported' : 'Restored to original places';
         setSuccessMsg(
-          `Restored to original places: ${res.count} records (${res.localCount} local kept offline without auto-sync), ${res.banksCount} banks, ${res.tagsCount} tags (${mode === 'merge' ? 'Installed safely' : 'Replaced all'})`
+          `${label}: ${res.count} records (${res.localCount} local kept offline without auto-sync), ${res.banksCount} banks, ${res.tagsCount} tags (${mode === 'merge' ? 'Installed safely' : 'Replaced all'})`
         );
         setPendingRestore(null);
         setShowReplaceConfirm(false);
@@ -274,6 +342,10 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
       setSyncLoading(false);
     }
   };
+
+  const dateRangeLabel = pendingRestore
+    ? formatDateRange(pendingRestore.minTimestamp, pendingRestore.maxTimestamp)
+    : null;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
@@ -323,7 +395,9 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
           <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-3">
             <div className="flex items-center gap-2 text-amber-950 font-bold text-xs">
               <FileCheck size={15} className="text-amber-700" />
-              <span>Backup Inspection Summary</span>
+              <span>
+                {pendingRestore.kind === 'csv' ? 'CSV Import Inspection Summary' : 'Backup Inspection Summary'}
+              </span>
             </div>
             <div className="text-xs space-y-1.5 bg-white p-3 rounded-lg border border-amber-200">
               <div className="font-semibold text-slate-900">
@@ -333,6 +407,11 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                 {pendingRestore.sentCount} Sent · {pendingRestore.localCount} Local Unsent · {pendingRestore.serverIgnoredCount} Server Ignored
                 {pendingRestore.pendingOrFailedCount > 0 ? ` · ${pendingRestore.pendingOrFailedCount} Pending/Failed` : ''}
               </div>
+              {dateRangeLabel && (
+                <div className="text-xs text-[#0F4C3A] font-semibold font-mono bg-emerald-50/70 px-2 py-1 rounded border border-emerald-100">
+                  Original Dates: {dateRangeLabel}
+                </div>
+              )}
               {pendingRestore.exportedAt && (
                 <div className="text-xs text-slate-600 font-mono">
                   Exported: {pendingRestore.exportedAt}
@@ -344,7 +423,9 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                 </div>
               )}
               <div className="text-[11px] text-slate-500">
-                Schema v{pendingRestore.version} · Secret Key included: {pendingRestore.hasSecretKey ? 'Yes' : 'No'}
+                {pendingRestore.kind === 'csv'
+                  ? `${pendingRestore.detectedFormat || 'CSV'} · ${pendingRestore.fileCount || 1} file(s)`
+                  : `Schema v${pendingRestore.version} · Secret Key included: ${pendingRestore.hasSecretKey ? 'Yes' : 'No'}`}
               </div>
               <div className="text-[11px] font-semibold text-[#0F4C3A] bg-emerald-50 border border-emerald-200 rounded-md px-2.5 py-1.5">
                 Imported local/unsent records will NOT be auto-synced to the server — select and sync them manually when ready.
@@ -507,17 +588,19 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Upload size={15} className="text-[#0F4C3A]" />
-              <span className="text-xs font-bold text-slate-900">Import Backup to Original Places</span>
+              <span className="text-xs font-bold text-slate-900">Import Backup (JSON or CSV)</span>
             </div>
-            <span className="text-xs font-semibold text-emerald-700">Non-destructive Merge</span>
+            <span className="text-xs font-semibold text-emerald-700">Original Dates</span>
           </div>
           <p className="text-xs text-slate-600 leading-relaxed">
-            Restores every message ID, timestamp, bank, tag, override, budget, and setting back into its original store.
+            Restores every message ID, original timestamp, bank, tag, override, budget, and setting back into its original store.
           </p>
           <input
             type="file"
             ref={fileInputRef}
-            accept=".json,application/json"
+            aria-label="Select backup JSON or CSV file"
+            multiple
+            accept=".json,.csv,application/json,text/csv"
             onChange={handleFileSelected}
             className="hidden"
           />
@@ -528,16 +611,16 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
             className="w-full py-2.5 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
           >
             <Upload size={13} className="text-[#0F4C3A]" />
-            <span>Select Backup JSON File</span>
+            <span>Select Backup JSON or CSV File</span>
           </button>
         </div>
 
-        {/* Section 4: CSV Export */}
+        {/* Section 4: CSV Export & Multi-CSV Import */}
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <FileSpreadsheet size={15} className="text-emerald-700" />
-              <span className="text-xs font-bold text-slate-900">CSV Ledger Export (UTF-8 BOM)</span>
+              <span className="text-xs font-bold text-slate-900">CSV Export & Import (All Transactions)</span>
             </div>
             <span className="text-xs font-semibold text-slate-600">Date & Time Columns</span>
           </div>
@@ -561,6 +644,24 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
               <span>Share (.csv)</span>
             </button>
           </div>
+          <input
+            type="file"
+            ref={csvInputRef}
+            aria-label="Import all CSV files"
+            multiple
+            accept=".csv,text/csv,application/csv,application/vnd.ms-excel"
+            onChange={handleFileSelected}
+            className="hidden"
+          />
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => csvInputRef.current?.click()}
+            className="w-full py-2.5 px-3 rounded-lg border border-emerald-300 bg-white hover:bg-emerald-50 text-[#0F4C3A] text-xs font-semibold whitespace-nowrap flex items-center justify-center gap-1.5"
+          >
+            <Upload size={13} />
+            <span>Import CSV File(s) (.csv)</span>
+          </button>
         </div>
 
         {/* Section 5: Sync Local Storage to Server */}

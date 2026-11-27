@@ -2,6 +2,7 @@
  * Native Bridge Interface for Ak Finance
  * Bridges Capacitor Web layer with native Android SharedPreferences, SQLite (ejeta.db), and local browser storage
  */
+import { normalizeEpochTimestamp } from './csvImport.ts';
 
 export interface NativeSettings {
   url: string;
@@ -407,40 +408,70 @@ export const importNativeMessagesBatch = async (
     id?: number;
     sender: string;
     body: string;
-    ts?: number;
+    ts?: number | string;
     status?: NativeSmsMessage['status'];
     tries?: number;
     err?: string | null;
     code?: number;
   }>,
   mode: 'merge' | 'replace' = 'merge'
-): Promise<{ importedCount: number; idRemap: Record<string, number> }> => {
+): Promise<{ importedCount: number; idRemap: Record<string, number>; assignedIds: number[] }> => {
   const idRemap: Record<string, number> = {};
+  const assignedIds: number[] = [];
 
-  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.insertTestSms) {
-    let importedCount = 0;
-    for (const m of incoming) {
-      if (!m || !m.sender || !m.body) continue;
-      const ok = !!(window as any).AndroidBridge.insertTestSms(m.sender, m.body);
-      if (ok) importedCount++;
+  const normalizedIncoming = incoming.map(m => {
+    if (!m || !m.sender || !m.body) return null;
+    const ts = normalizeEpochTimestamp(m.ts, undefined, undefined, m.body);
+    const allowedStatus: NativeSmsMessage['status'] =
+      m.status === 'sent' || m.status === 'pending' || m.status === 'failed' || m.status === 'local'
+        ? m.status
+        : 'local';
+    return {
+      id: typeof m.id === 'number' && Number.isFinite(m.id) && m.id > 0 ? Math.trunc(m.id) : undefined,
+      sender: String(m.sender).trim(),
+      body: String(m.body),
+      ts,
+      status: allowedStatus,
+      tries: Number(m.tries) || 0,
+      err: m.err ?? null,
+      code: Number(m.code) || 0,
+    };
+  });
+
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.importMessagesBatch) {
+    try {
+      const payload = normalizedIncoming.map(m => m || {});
+      const raw = (window as any).AndroidBridge.importMessagesBatch(JSON.stringify(payload), mode);
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return {
+        importedCount: Number(parsed?.importedCount) || 0,
+        idRemap: (parsed?.idRemap && typeof parsed.idRemap === 'object' ? parsed.idRemap : {}) as Record<string, number>,
+        assignedIds: Array.isArray(parsed?.assignedIds) ? parsed.assignedIds.map((x: any) => Number(x) || 0) : [],
+      };
+    } catch (e) {
+      console.warn('AndroidBridge.importMessagesBatch failed, falling back:', e);
     }
-    return { importedCount, idRemap };
   }
 
   const existing = mode === 'replace' ? [] : await getNativeMessages();
   const usedIds = new Set<number>(existing.map(m => m.id));
-  const exactKeySet = new Set<string>(
-    existing.map(m => `${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}|${m.ts}`)
-  );
+  const exactKeyToId = new Map<string, number>();
+  for (const m of existing) {
+    exactKeyToId.set(`${(m.sender || '').toLowerCase()}|${(m.body || '').trim()}|${m.ts}`, m.id);
+  }
 
   const result: NativeSmsMessage[] = [...existing];
   let importedCount = 0;
 
-  for (const m of incoming) {
-    if (!m || !m.sender || !m.body) continue;
-    const ts = typeof m.ts === 'number' && m.ts > 0 ? m.ts : Date.now();
-    const exactKey = `${m.sender.toLowerCase()}|${m.body.trim()}|${ts}`;
-    if (mode === 'merge' && exactKeySet.has(exactKey)) {
+  for (const m of normalizedIncoming) {
+    if (!m) {
+      assignedIds.push(0);
+      continue;
+    }
+    const exactKey = `${m.sender.toLowerCase()}|${m.body.trim()}|${m.ts}`;
+    const existingMatchedId = exactKeyToId.get(exactKey);
+    if (mode === 'merge' && existingMatchedId !== undefined) {
+      assignedIds.push(existingMatchedId);
       continue;
     }
 
@@ -457,29 +488,25 @@ export const importNativeMessagesBatch = async (
       }
     }
     usedIds.add(finalId);
-    exactKeySet.add(exactKey);
-
-    const allowedStatus: NativeSmsMessage['status'] =
-      m.status === 'sent' || m.status === 'pending' || m.status === 'failed' || m.status === 'local'
-        ? m.status
-        : 'local';
+    exactKeyToId.set(exactKey, finalId);
+    assignedIds.push(finalId);
 
     result.push({
       id: finalId,
       sender: m.sender,
       body: m.body,
-      ts,
-      status: allowedStatus,
-      tries: Number(m.tries) || 0,
-      err: m.err ?? null,
-      code: Number(m.code) || 0,
+      ts: m.ts,
+      status: m.status,
+      tries: m.tries,
+      err: m.err,
+      code: m.code,
     });
     importedCount++;
   }
 
   result.sort((a, b) => b.ts - a.ts || b.id - a.id);
   localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(result));
-  return { importedCount, idRemap };
+  return { importedCount, idRemap, assignedIds };
 };
 
 export const clearAllNativeMessages = async (): Promise<boolean> => {
@@ -497,8 +524,16 @@ export const clearAllNativeMessages = async (): Promise<boolean> => {
 };
 
 export const clearAllNativeState = async (): Promise<boolean> => {
-  await clearAllNativeMessages();
+  if (typeof window !== 'undefined' && (window as any).AndroidBridge?.clearAllState) {
+    try {
+      (window as any).AndroidBridge.clearAllState();
+    } catch {}
+  } else {
+    await clearAllNativeMessages();
+  }
   try {
+    localStorage.removeItem(WEB_STORAGE_KEYS.MESSAGES);
+    localStorage.removeItem('ak_server_results_sim');
     localStorage.removeItem('ak_sms_overrides_sim');
     localStorage.removeItem('ak_opening_balances_sim');
     localStorage.removeItem('ak_counterparty_tags_sim');
@@ -781,6 +816,7 @@ export const saveNativeServerResultsBatch = async (
 ): Promise<boolean> => {
   try {
     const current = mode === 'replace' ? {} : await getNativeServerResults();
+    const hasNative = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveServerResult;
     for (const [key, sr] of Object.entries(incoming)) {
       if (!sr || typeof sr !== 'object') continue;
       const origId = String(sr.smsId ?? key);
@@ -788,7 +824,7 @@ export const saveNativeServerResultsBatch = async (
       if (!Number.isFinite(targetId)) continue;
       const targetKey = String(targetId);
       if (mode === 'merge' && current[targetKey]) continue;
-      current[targetKey] = {
+      const entry: NativeServerResult = {
         smsId: targetId,
         httpCode: Number(sr.httpCode || 200),
         status: (sr.status as any) || 'Unknown',
@@ -796,7 +832,28 @@ export const saveNativeServerResultsBatch = async (
         reason: sr.reason || '',
         raw: sr.raw || '',
         at: Number(sr.at) || Date.now(),
+        bank: sr.bank,
+        type: sr.type,
+        amount: sr.amount,
+        balance: sr.balance,
+        agent: sr.agent,
+        usage: sr.usage,
+        claimed_by: sr.claimed_by,
+        claimed_txn_id: sr.claimed_txn_id,
       };
+      current[targetKey] = entry;
+      if (hasNative) {
+        try {
+          (window as any).AndroidBridge.saveServerResult(
+            targetId,
+            entry.httpCode,
+            entry.status,
+            entry.ref || '',
+            entry.reason || '',
+            entry.raw || ''
+          );
+        } catch {}
+      }
     }
     localStorage.setItem('ak_server_results_sim', JSON.stringify(current));
     return true;
@@ -812,12 +869,14 @@ export const saveNativeSmsOverridesBatch = async (
 ): Promise<boolean> => {
   try {
     const current = mode === 'replace' ? {} : await getNativeSmsOverrides();
+    const hasNativeWithTag = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveSmsOverrideWithTag;
+    const hasNativeBasic = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveSmsOverride;
     for (const [key, ov] of Object.entries(incoming)) {
       if (!ov || typeof ov !== 'object') continue;
-      const targetId = idRemap[key] ?? key;
-      const targetKey = String(targetId);
+      const targetId = idRemap[key] ?? Number(key);
+      const targetKey = String(Number.isFinite(targetId) ? targetId : key);
       if (mode === 'merge' && current[targetKey]) continue;
-      current[targetKey] = {
+      const entry: SmsOverride = {
         counterparty: ov.counterparty ?? null,
         direction: (ov.direction as any) ?? null,
         note: ov.note || '',
@@ -826,6 +885,32 @@ export const saveNativeSmsOverridesBatch = async (
         reference: ov.reference || undefined,
         category: ov.category || undefined,
       };
+      current[targetKey] = entry;
+      const numId = Number(targetKey);
+      if (Number.isFinite(numId)) {
+        if (hasNativeWithTag) {
+          try {
+            (window as any).AndroidBridge.saveSmsOverrideWithTag(
+              numId,
+              entry.counterparty,
+              entry.direction,
+              entry.note,
+              entry.isHidden,
+              entry.tag || ''
+            );
+          } catch {}
+        } else if (hasNativeBasic) {
+          try {
+            (window as any).AndroidBridge.saveSmsOverride(
+              numId,
+              entry.counterparty,
+              entry.direction,
+              entry.note,
+              entry.isHidden
+            );
+          } catch {}
+        }
+      }
     }
     localStorage.setItem('ak_sms_overrides_sim', JSON.stringify(current));
     return true;
@@ -840,10 +925,16 @@ export const saveNativeOpeningBalancesBatch = async (
 ): Promise<boolean> => {
   try {
     const current = mode === 'replace' ? {} : await getNativeOpeningBalances();
+    const hasNative = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveOpeningBalance;
     for (const [bank, amount] of Object.entries(incoming)) {
       if (typeof amount === 'number' && Number.isFinite(amount)) {
         if (mode === 'replace' || current[bank] === undefined) {
           current[bank] = amount;
+          if (hasNative) {
+            try {
+              (window as any).AndroidBridge.saveOpeningBalance(bank, amount);
+            } catch {}
+          }
         }
       }
     }
@@ -860,11 +951,17 @@ export const saveNativeCounterpartyTagsBatch = async (
 ): Promise<boolean> => {
   try {
     const current = mode === 'replace' ? {} : await getNativeCounterpartyTags();
+    const hasNative = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveCounterpartyTag;
     for (const [cp, tag] of Object.entries(incoming)) {
       if (typeof tag === 'string' && tag.trim()) {
         const cleanCp = cp.trim();
         if (mode === 'replace' || !current[cleanCp]) {
           current[cleanCp] = tag.trim();
+          if (hasNative) {
+            try {
+              (window as any).AndroidBridge.saveCounterpartyTag(cleanCp, tag.trim());
+            } catch {}
+          }
         }
       }
     }
@@ -881,9 +978,15 @@ export const saveNativeSenderBankMapBatch = async (
 ): Promise<boolean> => {
   try {
     const current = mode === 'replace' ? {} : await getNativeSenderBankMap();
+    const hasNative = typeof window !== 'undefined' && !!(window as any).AndroidBridge?.saveSenderBankMap;
     for (const [sender, bank] of Object.entries(incoming)) {
       if (typeof bank === 'string' && bank.trim()) {
         current[sender] = bank.trim();
+        if (hasNative) {
+          try {
+            (window as any).AndroidBridge.saveSenderBankMap(sender, bank.trim());
+          } catch {}
+        }
       }
     }
     localStorage.setItem('ak_sender_bank_map_sim', JSON.stringify(current));

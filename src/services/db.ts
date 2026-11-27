@@ -18,13 +18,16 @@ import {
 import {
   resolveAllowedAiModel,
 } from '../constants/aiModels.ts';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import {
   DEFAULT_HULUBET_SERVER_URL,
+  resolveHuluBetEndpointUrl,
   isTelebirrOrCbeSms,
   classifyHuluBetWebhookResponse,
   computeExponentialBackoffMs,
   isQueueItemDueForRetry,
   normalizeHuluBetServerRecord,
+  extractRecentArrayFromPayload,
   normalizeRefKey,
   HuluBetNormalizedRecord,
 } from '../utils/hulubetSync.ts';
@@ -57,6 +60,7 @@ import {
   saveNativeServerResultsBatch,
   getAiParsedCache,
   saveAiParsedCacheEntry,
+  isAndroidNative,
 } from '../utils/nativeBridge.ts';
 
 const LOCAL_STORAGE_KEYS = {
@@ -574,22 +578,10 @@ class DatabaseService {
     }
 
     try {
-      const response = await fetch('/api/sync/forward', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: targetUrl,
-          serverUrl: targetUrl,
-          token: settings.secretKey || '',
-          sender: msg.sender || '',
-          message: msg.body || '',
-          ts: msg.ts || Date.now(),
-        }),
-      });
-      const data = await response.json();
-      const httpCode = Number(data?.httpCode || response.status || 0);
+      const data = await this.callHuluBetForward(targetUrl, settings.secretKey || '', msg.sender || '', msg.body || '');
+      const httpCode = Number(data?.httpCode || 0);
       const parsedReply = data?.parsed || {};
-      const replyStatus = parsedReply.status || data?.status || (response.ok && data?.ok ? 'Saved' : 'Unknown');
+      const replyStatus = parsedReply.status || data?.status || (data?.ok ? 'Saved' : 'Unknown');
       const reason = parsedReply.reason || data?.reason || '';
       const ref = parsedReply.ref || data?.ref || '';
       const agent = parsedReply.agent || data?.agent || settings.deviceLabel || undefined;
@@ -723,6 +715,222 @@ class DatabaseService {
     }
   }
 
+  private async tryLocalSyncProxy(proxyPath: string, payload: Record<string, unknown>): Promise<any | null> {
+    if (isAndroidNative() || Capacitor.isNativePlatform()) {
+      return null;
+    }
+    try {
+      const response = await fetch(proxyPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const rawText = await response.text();
+      if (!rawText || rawText.trimStart().startsWith('<') || response.status === 404 || response.status === 405) {
+        return null;
+      }
+      return JSON.parse(rawText);
+    } catch {
+      return null;
+    }
+  }
+
+  private async directHuluBetGet(
+    serverUrl: string,
+    endpointPath: '/webhook/sms' | '/api/recent' | '/api/check',
+    query: Record<string, string | number>
+  ): Promise<{ httpCode: number; ok: boolean; rawText: string; parsedJson: any }> {
+    const endpointBase = resolveHuluBetEndpointUrl(serverUrl, endpointPath);
+    const qs = Object.entries(query)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join('&');
+    const fullUrl = qs ? `${endpointBase}?${qs}` : endpointBase;
+
+    let httpCode = 0;
+    let rawText = '';
+    let directData: any = null;
+
+    if (Capacitor.isNativePlatform() || isAndroidNative()) {
+      try {
+        const res = await CapacitorHttp.get({
+          url: fullUrl,
+          headers: { Accept: 'application/json' },
+          connectTimeout: 10000,
+          readTimeout: 10000,
+        });
+        httpCode = Number(res.status || 0);
+        if (typeof res.data === 'string') {
+          rawText = res.data;
+        } else if (res.data !== undefined && res.data !== null) {
+          directData = res.data;
+          rawText = JSON.stringify(res.data);
+        }
+      } catch {
+        // Fall through to standard fetch below if CapacitorHttp bridge is unavailable
+      }
+    }
+
+    if (httpCode === 0 && !rawText) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch(fullUrl, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        });
+        httpCode = response.status;
+        rawText = await response.text();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    let parsedJson: any = directData ?? {};
+    if (!directData && rawText) {
+      if (rawText.trimStart().startsWith('<')) {
+        throw new Error('Server returned HTML instead of JSON. Check your Server URL.');
+      }
+      try {
+        parsedJson = JSON.parse(rawText);
+      } catch {
+        parsedJson = {};
+      }
+    }
+
+    return {
+      httpCode,
+      ok: httpCode >= 200 && httpCode < 300,
+      rawText,
+      parsedJson,
+    };
+  }
+
+  private async callHuluBetForward(serverUrl: string, token: string, sender: string, message: string): Promise<any> {
+    const proxied = await this.tryLocalSyncProxy('/api/sync/forward', {
+      url: serverUrl,
+      serverUrl,
+      token,
+      sender,
+      message,
+      ts: Date.now(),
+    });
+    if (proxied) return proxied;
+
+    const { httpCode, ok, rawText, parsedJson } = await this.directHuluBetGet(serverUrl, '/webhook/sms', {
+      token: token.trim(),
+      sender: sender || '',
+      message: message || '',
+    });
+    const norm = normalizeHuluBetServerRecord(parsedJson) || {};
+    const rawStatus = (norm.status || (typeof parsedJson?.status === 'string' ? parsedJson.status : '')).trim();
+    const mappedStatus =
+      rawStatus === 'Saved' || rawStatus === 'Duplicate' || rawStatus === 'Ignored'
+        ? rawStatus
+        : ok
+          ? 'Saved'
+          : 'Unknown';
+
+    const errDetail =
+      typeof parsedJson?.error === 'string'
+        ? parsedJson.error
+        : typeof parsedJson?.message === 'string' && !ok
+          ? parsedJson.message
+          : !ok
+            ? httpCode === 401
+              ? 'Wrong token (HTTP 401 Unauthorized)'
+              : `HTTP ${httpCode || 'Error'}`
+            : undefined;
+
+    return {
+      ok,
+      httpCode,
+      status: mappedStatus,
+      reason: norm.reason,
+      ref: norm.ref,
+      bank: norm.bank,
+      type: norm.type,
+      amount: norm.amount,
+      balance: norm.balance,
+      agent: norm.agent,
+      usage: norm.usage,
+      claimed_by: norm.claimed_by,
+      claimed_txn_id: norm.claimed_txn_id,
+      error: errDetail,
+      raw: rawText,
+      parsed: { status: mappedStatus, ...norm },
+    };
+  }
+
+  private async callHuluBetRecent(serverUrl: string, token: string, limit: number): Promise<any> {
+    const proxied = await this.tryLocalSyncProxy('/api/sync/recent', {
+      url: serverUrl,
+      token: token.trim(),
+      limit,
+    });
+    if (proxied) return proxied;
+
+    const { httpCode, ok, parsedJson } = await this.directHuluBetGet(serverUrl, '/api/recent', {
+      token: token.trim(),
+      limit,
+    });
+    const items = ok ? extractRecentArrayFromPayload(parsedJson) : [];
+    const topAgent =
+      typeof parsedJson?.agent === 'string' && parsedJson.agent.trim()
+        ? parsedJson.agent.trim()
+        : typeof parsedJson?.role === 'string' && parsedJson.role.trim()
+          ? parsedJson.role.trim()
+          : items.find(i => i.agent)?.agent;
+
+    const errDetail = !ok
+      ? typeof parsedJson?.error === 'string'
+        ? parsedJson.error
+        : typeof parsedJson?.message === 'string'
+          ? parsedJson.message
+          : httpCode === 401
+            ? 'Wrong token (HTTP 401 Unauthorized)'
+            : `HTTP ${httpCode || 'Error'}`
+      : undefined;
+
+    return {
+      ok,
+      httpCode,
+      agent: topAgent,
+      items,
+      error: errDetail,
+    };
+  }
+
+  private async callHuluBetCheck(serverUrl: string, token: string, ref: string): Promise<any> {
+    const proxied = await this.tryLocalSyncProxy('/api/sync/check', {
+      url: serverUrl,
+      token: token.trim(),
+      ref,
+    });
+    if (proxied) return proxied;
+
+    const { httpCode, ok, parsedJson } = await this.directHuluBetGet(serverUrl, '/api/check', {
+      token: token.trim(),
+      ref,
+    });
+    const candidateObj = parsedJson?.transaction || parsedJson?.item || parsedJson?.data || parsedJson;
+    const normalized = ok ? normalizeHuluBetServerRecord(candidateObj) : null;
+    const errDetail = !ok
+      ? typeof parsedJson?.error === 'string'
+        ? parsedJson.error
+        : httpCode === 401
+          ? 'Wrong token (HTTP 401 Unauthorized)'
+          : `HTTP ${httpCode || 'Error'}`
+      : undefined;
+
+    return {
+      ok,
+      httpCode,
+      record: normalized,
+      error: errDetail,
+    };
+  }
+
   public async testHuluBetConnection(
     serverUrl: string,
     token: string,
@@ -733,13 +941,8 @@ class DatabaseService {
       return { ok: false, httpCode: 0, message: 'Server URL is required.' };
     }
     try {
-      const response = await fetch('/api/sync/recent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: cleanUrl, token: token.trim(), limit: 1 }),
-      });
-      const data = await response.json();
-      const httpCode = Number(data?.httpCode || response.status || 0);
+      const data = await this.callHuluBetRecent(cleanUrl, token.trim(), 1);
+      const httpCode = Number(data?.httpCode || 0);
       if (data?.ok) {
         const connectedRole = data.agent || roleLabel || 'Device';
         return {
@@ -778,13 +981,8 @@ class DatabaseService {
     }
 
     try {
-      const response = await fetch('/api/sync/recent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl, token, limit: 50 }),
-      });
-      const data = await response.json();
-      const httpCode = Number(data?.httpCode || response.status || 0);
+      const data = await this.callHuluBetRecent(targetUrl, token, 50);
+      const httpCode = Number(data?.httpCode || 0);
       if (!data?.ok) {
         return {
           ok: false,
@@ -863,13 +1061,8 @@ class DatabaseService {
     }
 
     try {
-      const response = await fetch('/api/sync/check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl, token, ref: cleanRef }),
-      });
-      const data = await response.json();
-      const httpCode = Number(data?.httpCode || response.status || 0);
+      const data = await this.callHuluBetCheck(targetUrl, token, cleanRef);
+      const httpCode = Number(data?.httpCode || 0);
       if (!data?.ok) {
         return {
           ok: false,

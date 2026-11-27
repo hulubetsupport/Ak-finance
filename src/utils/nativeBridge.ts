@@ -21,6 +21,8 @@ export interface NativeSmsMessage {
   tries: number;
   err: string | null;
   code: number;
+  nextRetryAt?: number;
+  authError?: boolean;
 }
 
 export interface NativeStatus {
@@ -74,7 +76,7 @@ const DEFAULT_SENDERS_CSV =
   'CBE,127,Telebirr,AwashBank,Awash,Dashen,DashenBank,BOA,Abyssinia,Zemen,Siinqee,eBirr,ZamZam,Bunna,Wegagen,CBEBirr,M-PESA,AbayBank,NibBank,Hibret,CoopBank,Tsedey';
 
 const DEFAULT_SETTINGS: NativeSettings = {
-  url: '',
+  url: 'https://verifiy-server.app.aletcloud.com',
   token: '',
   method: 'GET',
   interval: 15,
@@ -277,17 +279,19 @@ function generateNumericId(): number {
   return Date.now() * 1000 + uniqueIdCounter;
 }
 
-export const insertNativeTestSms = async (sender: string, body: string): Promise<boolean> => {
+export const insertNativeTestSmsWithId = async (sender: string, body: string): Promise<number | null> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.insertTestSms) {
-    return !!(window as any).AndroidBridge.insertTestSms(sender, body);
+    const ok = !!(window as any).AndroidBridge.insertTestSms(sender, body);
+    return ok ? generateNumericId() : null;
   }
 
   try {
     const list = await getNativeMessages();
     const settings = await getNativeSettings();
     const isServer = settings.mode === 'server' && Boolean(settings.url?.trim());
+    const id = generateNumericId();
     const newMsg: NativeSmsMessage = {
-      id: generateNumericId(),
+      id,
       sender,
       body,
       ts: Date.now(),
@@ -298,10 +302,15 @@ export const insertNativeTestSms = async (sender: string, body: string): Promise
     };
     list.unshift(newMsg);
     localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(list));
-    return true;
+    return id;
   } catch {
-    return false;
+    return null;
   }
+};
+
+export const insertNativeTestSms = async (sender: string, body: string): Promise<boolean> => {
+  const id = await insertNativeTestSmsWithId(sender, body);
+  return id !== null;
 };
 
 export const insertNativeSmsWithMeta = async (msg: {
@@ -344,7 +353,12 @@ export const updateNativeMessageStatus = async (
   id: number,
   status: NativeSmsMessage['status'],
   code: number,
-  err: string | null = null
+  err: string | null = null,
+  options?: {
+    incrementTries?: boolean;
+    nextRetryAt?: number;
+    authError?: boolean;
+  }
 ): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.updateMessageStatus) {
     try {
@@ -356,12 +370,15 @@ export const updateNativeMessageStatus = async (
     const list = await getNativeMessages();
     const idx = list.findIndex(m => m.id === id);
     if (idx < 0) return false;
+    const shouldIncrement = options?.incrementTries !== false;
     list[idx] = {
       ...list[idx],
       status,
       code,
       err,
-      tries: (list[idx].tries || 0) + 1,
+      tries: shouldIncrement ? (list[idx].tries || 0) + 1 : list[idx].tries || 0,
+      nextRetryAt: options?.nextRetryAt,
+      authError: options?.authError,
     };
     localStorage.setItem(WEB_STORAGE_KEYS.MESSAGES, JSON.stringify(list));
     return true;
@@ -727,6 +744,17 @@ export interface NativeServerResult {
   reason?: string;
   raw?: string;
   at: number;
+  bank?: string;
+  type?: string;
+  amount?: number;
+  balance?: number;
+  agent?: string;
+  usage?: 'Unused' | 'Used' | 'Sent_Locked' | 'Payout_Verified';
+  claimed_by?: string;
+  claimed_txn_id?: string;
+  needsReview?: boolean;
+  needsReviewReason?: string;
+  lastCheckedAt?: number;
 }
 
 export const getNativeServerResults = async (): Promise<Record<string, NativeServerResult>> => {
@@ -871,22 +899,54 @@ export const saveNativeServerResult = async (
   status: string,
   ref: string,
   reason: string,
-  raw: string
+  raw: string,
+  extra?: Partial<NativeServerResult>
 ): Promise<boolean> => {
   if (typeof window !== 'undefined' && (window as any).AndroidBridge?.saveServerResult) {
-    return !!(window as any).AndroidBridge.saveServerResult(smsId, httpCode, status, ref, reason, raw);
+    try {
+      (window as any).AndroidBridge.saveServerResult(smsId, httpCode, status, ref, reason, raw);
+    } catch {}
   }
 
   try {
     const current = await getNativeServerResults();
+    const prev = current[String(smsId)] || ({} as Partial<NativeServerResult>);
     current[String(smsId)] = {
+      ...prev,
+      ...(extra || {}),
       smsId,
       httpCode,
       status: status as any,
-      ref,
+      ref: ref || prev.ref || '',
       reason,
       raw,
       at: Date.now(),
+    };
+    localStorage.setItem('ak_server_results_sim', JSON.stringify(current));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const mergeNativeServerResult = async (
+  smsId: number,
+  patch: Partial<NativeServerResult>
+): Promise<boolean> => {
+  try {
+    const current = await getNativeServerResults();
+    const key = String(smsId);
+    const prev = current[key] || {
+      smsId,
+      httpCode: 200,
+      status: 'Saved' as const,
+      at: Date.now(),
+    };
+    current[key] = {
+      ...prev,
+      ...patch,
+      smsId,
+      at: patch.at ?? prev.at ?? Date.now(),
     };
     localStorage.setItem('ak_server_results_sim', JSON.stringify(current));
     return true;

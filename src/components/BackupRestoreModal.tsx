@@ -28,7 +28,7 @@ interface BackupRestoreModalProps {
   isOpen: boolean;
   onClose: () => void;
   onDataRestored: () => Promise<void>;
-  onTriggerBulkSync?: () => Promise<{ synced: number; ignored: number; failed: number; error?: string }>;
+  onTriggerBulkSync?: () => Promise<{ synced: number; needsReview?: number; ignored?: number; failed: number; error?: string }>;
   serverUrlConfigured?: boolean;
 }
 
@@ -263,8 +263,9 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
       if (res.error) {
         setErrorMsg(res.error);
       } else {
+        const reviewCount = ('needsReview' in res ? res.needsReview : 0) ?? ('ignored' in res ? res.ignored : 0) ?? 0;
         setSuccessMsg(
-          `Sync finished: ${res.synced} saved · ${res.ignored} server ignored (preserved locally) · ${res.failed} failed`
+          `Sync finished: ${res.synced} synced${reviewCount > 0 ? ` · ${reviewCount} needs review` : ''} · ${res.failed} failed`
         );
       }
     } catch (err: any) {

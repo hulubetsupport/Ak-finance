@@ -19,13 +19,23 @@ import {
   resolveAllowedAiModel,
 } from '../constants/aiModels.ts';
 import {
+  DEFAULT_HULUBET_SERVER_URL,
+  isTelebirrOrCbeSms,
+  classifyHuluBetWebhookResponse,
+  computeExponentialBackoffMs,
+  isQueueItemDueForRetry,
+  normalizeHuluBetServerRecord,
+  normalizeRefKey,
+  HuluBetNormalizedRecord,
+} from '../utils/hulubetSync.ts';
+import {
   getNativeSettings,
   saveNativeSettings,
   getNativeMessages,
   deleteNativeMessage,
   clearAllNativeMessages,
   clearAllNativeState,
-  insertNativeTestSms,
+  insertNativeTestSmsWithId,
   importNativeMessagesBatch,
   updateNativeMessageStatus,
   getNativeOpeningBalances,
@@ -43,6 +53,7 @@ import {
   saveNativeCounterpartyTagsBatch,
   getNativeServerResults,
   saveNativeServerResult,
+  mergeNativeServerResult,
   saveNativeServerResultsBatch,
   getAiParsedCache,
   saveAiParsedCacheEntry,
@@ -156,12 +167,26 @@ class DatabaseService {
       .map(s => s.trim())
       .filter(Boolean);
 
+    const deviceRole: 'owner' | 'agent' = uiPrefs.deviceRole === 'agent' ? 'agent' : 'owner';
+    const roleTokens: { owner?: string; agent?: string } = {
+      ...(uiPrefs.roleTokens && typeof uiPrefs.roleTokens === 'object' ? uiPrefs.roleTokens : {}),
+    };
+    if (native.token && !roleTokens[deviceRole]) {
+      roleTokens[deviceRole] = native.token;
+    }
+
+    const activeToken = native.token || roleTokens[deviceRole] || '';
+    const defaultLabel = deviceRole === 'owner' ? 'Owner' : 'Agent 1';
+
     return {
-      serverUrl: native.url,
-      secretKey: native.token,
-      httpMethod: native.method,
+      serverUrl: native.url || DEFAULT_HULUBET_SERVER_URL,
+      secretKey: activeToken,
+      httpMethod: 'GET',
       retryIntervalSeconds: native.interval,
       mode: native.mode,
+      deviceRole,
+      deviceLabel: typeof uiPrefs.deviceLabel === 'string' && uiPrefs.deviceLabel.trim() ? uiPrefs.deviceLabel.trim() : defaultLabel,
+      roleTokens,
       allowedSenders: sendersArr,
       language: uiPrefs.language === 'am' ? 'am' : 'en',
       hideBalances: !!uiPrefs.hideBalances,
@@ -176,17 +201,37 @@ class DatabaseService {
   }
 
   public async saveSettings(newSettings: Partial<AppSettings>): Promise<AppSettings> {
-    const toNative: any = {};
+    const uiPrefs = this.getUiPrefs();
+    const currentRole: 'owner' | 'agent' = newSettings.deviceRole === 'agent'
+      ? 'agent'
+      : newSettings.deviceRole === 'owner'
+        ? 'owner'
+        : uiPrefs.deviceRole === 'agent'
+          ? 'agent'
+          : 'owner';
+
+    const existingRoleTokens: { owner?: string; agent?: string } = {
+      ...(uiPrefs.roleTokens && typeof uiPrefs.roleTokens === 'object' ? uiPrefs.roleTokens : {}),
+      ...(newSettings.roleTokens || {}),
+    };
+
+    const toNative: any = { method: 'GET' };
     if (newSettings.serverUrl !== undefined) toNative.url = newSettings.serverUrl;
-    if (newSettings.secretKey !== undefined) toNative.token = newSettings.secretKey;
-    if (newSettings.httpMethod !== undefined) toNative.method = newSettings.httpMethod;
+    if (newSettings.secretKey !== undefined) {
+      toNative.token = newSettings.secretKey;
+      existingRoleTokens[currentRole] = newSettings.secretKey;
+    } else if (newSettings.deviceRole !== undefined && existingRoleTokens[currentRole] !== undefined) {
+      toNative.token = existingRoleTokens[currentRole] || '';
+    }
     if (newSettings.retryIntervalSeconds !== undefined) toNative.interval = newSettings.retryIntervalSeconds;
     if (newSettings.mode !== undefined) toNative.mode = newSettings.mode;
     if (newSettings.allowedSenders !== undefined) toNative.senders = newSettings.allowedSenders.join(',');
 
     await saveNativeSettings(toNative);
 
-    const uiPrefs = this.getUiPrefs();
+    uiPrefs.deviceRole = currentRole;
+    uiPrefs.roleTokens = existingRoleTokens;
+    if (newSettings.deviceLabel !== undefined) uiPrefs.deviceLabel = newSettings.deviceLabel;
     if (newSettings.language !== undefined) uiPrefs.language = newSettings.language;
     if (newSettings.hideBalances !== undefined) uiPrefs.hideBalances = newSettings.hideBalances;
     if (newSettings.soundEnabled !== undefined) uiPrefs.soundEnabled = newSettings.soundEnabled;
@@ -344,9 +389,17 @@ class DatabaseService {
           at: sr.at,
           resolving: !!parsedRaw.resolving,
           v2: parsedRaw.v2,
-          bank: parsedRaw.bank,
-          type: parsedRaw.type,
-          amount: parsedRaw.amount,
+          bank: sr.bank || parsedRaw.bank,
+          type: sr.type || parsedRaw.type,
+          amount: sr.amount ?? parsedRaw.amount,
+          balance: sr.balance ?? parsedRaw.balance,
+          agent: sr.agent || parsedRaw.agent,
+          usage: sr.usage || parsedRaw.usage,
+          claimed_by: sr.claimed_by || parsedRaw.claimed_by,
+          claimed_txn_id: sr.claimed_txn_id || parsedRaw.claimed_txn_id,
+          needsReview: sr.needsReview ?? parsedRaw.needsReview,
+          needsReviewReason: sr.needsReviewReason || parsedRaw.needsReviewReason,
+          lastCheckedAt: sr.lastCheckedAt,
         };
 
         if (serverResultObj.ref) {
@@ -355,6 +408,10 @@ class DatabaseService {
         }
         if (serverResultObj.v2 && !v2Code) {
           v2Code = serverResultObj.v2;
+        }
+        if (serverResultObj.balance !== undefined && balance === undefined) {
+          balance = serverResultObj.balance;
+          balanceSantim = Math.round(serverResultObj.balance * 100);
         }
       }
 
@@ -369,18 +426,12 @@ class DatabaseService {
       if (ov?.category) category = ov.category as PaymentCategory;
       const note = ov?.note || undefined;
 
-      // CRITICAL BUG FIX (#6 & #8):
-      // If the legacy server only supports CBE/Telebirr and replies `Ignored`, NEVER erase a valid local parse
-      // (such as Telebirr ATM Withdrawal screenshot 184622, Awash, Dashen, BOA, Zemen, Siinqee, etc.)!
-      // Only treat as an informational `alert` when the LOCAL parser itself identified it as a non-financial alert/OTP.
-      const serverIgnored = Boolean(
-        serverResultObj &&
-          (serverResultObj.status === 'Ignored' ||
-            (serverResultObj.reason && /not\s*a\s*payment|not\s*financial|ignored|unsupported/i.test(serverResultObj.reason)))
-      );
-      const serverIgnoredReason = serverIgnored
-        ? serverResultObj?.reason || 'Server ignored this SMS; parsed & saved locally by Ak Finance'
-        : undefined;
+      // Saved or Duplicate are ALWAYS Synced (never ignored/failed).
+      // Only explicit Ignored responses with Missing Ref / Missing Amount trigger "Needs review".
+      const needsReview = Boolean(serverResultObj?.needsReview);
+      const needsReviewReason = needsReview ? (serverResultObj?.needsReviewReason || serverResultObj?.reason) : undefined;
+      const serverIgnored = false;
+      const serverIgnoredReason = undefined;
 
       const localIsAlert = (category === 'alert' || amount === 0) && !ov?.direction;
       if (localIsAlert) {
@@ -436,6 +487,10 @@ class DatabaseService {
         syncStatus: status,
         serverIgnored,
         serverIgnoredReason,
+        needsReview,
+        needsReviewReason,
+        authError: Boolean(msg.authError),
+        nextRetryAt: msg.nextRetryAt,
         retryCount: msg.tries || 0,
         errorMessage: msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : undefined),
         serverResponse: msg.code ? `HTTP ${msg.code}` : undefined,
@@ -479,11 +534,23 @@ class DatabaseService {
     return list.find(p => p.id === id) || null;
   }
 
+  private isFlushingQueue = false;
+
   /**
-   * Sync a locally-saved SMS record to the user's configured webhook server via `/api/sync/forward`.
-   * Preserves local parsing even if the server replies `Ignored` or errors.
+   * Forward an SMS to HuluBet (`GET /webhook/sms?token=T&sender=S&message=...` via proxy).
+   * - Saved / Duplicate -> Synced ('sent'), never ignored/failed
+   * - Ignored ("Not a payment SMS") -> skip silently & remove from retry queue
+   * - Ignored ("Missing Ref" / "Missing Amount") -> mark Needs review & remove from retry queue
+   * - 401 -> wrong-token error, NO auto-retry
+   * - 400 / 500 / network error -> retry with exponential backoff (15s, 30s, 60s ... max 5m)
    */
-  public async syncPaymentToServer(paymentId: string): Promise<{ ok: boolean; status: string; message: string }> {
+  public async syncPaymentToServer(paymentId: string): Promise<{
+    ok: boolean;
+    status: string;
+    message: string;
+    authError?: boolean;
+    needsReview?: boolean;
+  }> {
     const [settings, messages] = await Promise.all([this.getSettings(), getNativeMessages()]);
     const msg = messages.find(m => String(m.id) === String(paymentId));
     if (!msg) return { ok: false, status: 'Error', message: 'Record not found in local storage.' };
@@ -493,8 +560,17 @@ class DatabaseService {
       return {
         ok: false,
         status: 'NoServer',
-        message: 'No webhook server URL configured in Settings. Saved locally.',
+        message: 'No HuluBet server URL configured in Settings. Saved locally.',
       };
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      const nextRetryAt = Date.now() + computeExponentialBackoffMs((msg.tries || 0) + 1);
+      await updateNativeMessageStatus(msg.id, 'failed', 0, 'Offline — queued for automatic retry', {
+        nextRetryAt,
+        authError: false,
+      });
+      return { ok: false, status: 'Offline', message: 'Offline — queued for automatic retry.' };
     }
 
     try {
@@ -504,7 +580,6 @@ class DatabaseService {
         body: JSON.stringify({
           url: targetUrl,
           serverUrl: targetUrl,
-          method: settings.httpMethod || 'GET',
           token: settings.secretKey || '',
           sender: msg.sender || '',
           message: msg.body || '',
@@ -515,57 +590,344 @@ class DatabaseService {
       const httpCode = Number(data?.httpCode || response.status || 0);
       const parsedReply = data?.parsed || {};
       const replyStatus = parsedReply.status || data?.status || (response.ok && data?.ok ? 'Saved' : 'Unknown');
-      const reason = parsedReply.reason || data?.reason || data?.error || '';
+      const reason = parsedReply.reason || data?.reason || '';
       const ref = parsedReply.ref || data?.ref || '';
+      const agent = parsedReply.agent || data?.agent || settings.deviceLabel || undefined;
+      const cls = classifyHuluBetWebhookResponse(httpCode, replyStatus, reason, data?.error);
       const rawBody = typeof data?.raw === 'string' ? data.raw : JSON.stringify(data);
 
-      await saveNativeServerResult(msg.id, httpCode, replyStatus, ref, reason, rawBody);
-
-      if (data?.ok || replyStatus === 'Ignored') {
-        await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null);
+      if (cls.outcome === 'synced') {
+        await saveNativeServerResult(msg.id, httpCode || 200, cls.serverStatus, ref, reason, rawBody, {
+          bank: parsedReply.bank || data?.bank,
+          type: parsedReply.type || data?.type,
+          amount: parsedReply.amount ?? data?.amount,
+          balance: parsedReply.balance ?? data?.balance,
+          agent,
+          usage: parsedReply.usage || data?.usage,
+          claimed_by: parsedReply.claimed_by || data?.claimed_by,
+          claimed_txn_id: parsedReply.claimed_txn_id || data?.claimed_txn_id,
+          needsReview: false,
+          needsReviewReason: undefined,
+        });
+        await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null, {
+          authError: false,
+          nextRetryAt: undefined,
+        });
         return {
           ok: true,
-          status: replyStatus,
-          message:
-            replyStatus === 'Ignored'
-              ? `Server replied Ignored (${reason || 'unsupported by server'}); kept strictly in local DB and will not retry.`
-              : `Synced to server (${replyStatus}${ref ? ` · ${ref}` : ''}).`,
+          status: cls.serverStatus,
+          message: `Synced to HuluBet (${cls.serverStatus}${ref ? ` · ${ref}` : ''}).`,
         };
-      } else {
-        const errMsg = data?.error || `HTTP ${httpCode || 500}`;
-        await updateNativeMessageStatus(msg.id, 'failed', httpCode || 500, errMsg);
-        return { ok: false, status: 'Failed', message: errMsg };
       }
+
+      if (cls.outcome === 'silent_skip') {
+        await saveNativeServerResult(msg.id, httpCode || 200, 'Ignored', ref, reason, rawBody, {
+          agent,
+          needsReview: false,
+          needsReviewReason: undefined,
+        });
+        await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null, {
+          authError: false,
+          nextRetryAt: undefined,
+        });
+        return {
+          ok: true,
+          status: 'Skipped',
+          message: 'Non-payment SMS skipped silently.',
+        };
+      }
+
+      if (cls.outcome === 'needs_review') {
+        await saveNativeServerResult(msg.id, httpCode || 200, 'Ignored', ref, reason, rawBody, {
+          agent,
+          needsReview: true,
+          needsReviewReason: cls.needsReviewReason || reason || 'Needs review',
+        });
+        await updateNativeMessageStatus(msg.id, 'sent', httpCode || 200, null, {
+          authError: false,
+          nextRetryAt: undefined,
+        });
+        return {
+          ok: true,
+          status: 'NeedsReview',
+          needsReview: true,
+          message: `Marked Needs review: ${cls.needsReviewReason || reason}`,
+        };
+      }
+
+      if (cls.outcome === 'auth_error') {
+        const errMsg = cls.errorMessage || 'Wrong token (HTTP 401). Update token in Settings.';
+        await updateNativeMessageStatus(msg.id, 'failed', 401, errMsg, {
+          authError: true,
+          nextRetryAt: undefined,
+        });
+        return {
+          ok: false,
+          status: 'AuthError',
+          authError: true,
+          message: errMsg,
+        };
+      }
+
+      // Retryable error (400 / 500 / network) -> keep in queue with exponential backoff (15s, 30s, 60s ... 5m)
+      const nextRetryAt = Date.now() + computeExponentialBackoffMs((msg.tries || 0) + 1);
+      const errMsg = cls.errorMessage || `HTTP ${httpCode || 500}`;
+      await updateNativeMessageStatus(msg.id, 'failed', httpCode || 500, errMsg, {
+        authError: false,
+        nextRetryAt,
+      });
+      return { ok: false, status: 'Failed', message: errMsg };
     } catch (err: any) {
+      const nextRetryAt = Date.now() + computeExponentialBackoffMs((msg.tries || 0) + 1);
       const errMsg = err?.message || 'Network sync failed';
-      await updateNativeMessageStatus(msg.id, 'failed', 0, errMsg);
+      await updateNativeMessageStatus(msg.id, 'failed', 0, errMsg, {
+        authError: false,
+        nextRetryAt,
+      });
       return { ok: false, status: 'Failed', message: errMsg };
     }
   }
 
-  public async syncAllLocalToServer(): Promise<{ synced: number; ignored: number; failed: number; error?: string }> {
+  public async processOfflineRetryQueue(force: boolean = false): Promise<{ retried: number; synced: number; failed: number }> {
+    if (this.isFlushingQueue) return { retried: 0, synced: 0, failed: 0 };
+    const settings = await this.getSettings();
+    if (settings.mode !== 'server' || !settings.serverUrl?.trim()) {
+      return { retried: 0, synced: 0, failed: 0 };
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return { retried: 0, synced: 0, failed: 0 };
+    }
+
+    this.isFlushingQueue = true;
+    let retried = 0;
+    let synced = 0;
+    let failed = 0;
+    try {
+      const [messages, senderMap] = await Promise.all([getNativeMessages(), getNativeSenderBankMap()]);
+      const now = Date.now();
+      for (const msg of messages) {
+        if (msg.authError) continue;
+        if (msg.status !== 'pending' && msg.status !== 'failed') continue;
+        if (!force && !isQueueItemDueForRetry(msg, now)) continue;
+        if (!isTelebirrOrCbeSms(msg.sender, msg.body, senderMap) && msg.status !== 'pending') continue;
+
+        retried++;
+        const res = await this.syncPaymentToServer(String(msg.id));
+        if (res.ok) synced++;
+        else failed++;
+        if (res.authError) break;
+      }
+      return { retried, synced, failed };
+    } finally {
+      this.isFlushingQueue = false;
+    }
+  }
+
+  public async testHuluBetConnection(
+    serverUrl: string,
+    token: string,
+    roleLabel: string
+  ): Promise<{ ok: boolean; httpCode: number; role?: string; message: string }> {
+    const cleanUrl = (serverUrl || '').trim();
+    if (!cleanUrl) {
+      return { ok: false, httpCode: 0, message: 'Server URL is required.' };
+    }
+    try {
+      const response = await fetch('/api/sync/recent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: cleanUrl, token: token.trim(), limit: 1 }),
+      });
+      const data = await response.json();
+      const httpCode = Number(data?.httpCode || response.status || 0);
+      if (data?.ok) {
+        const connectedRole = data.agent || roleLabel || 'Device';
+        return {
+          ok: true,
+          httpCode,
+          role: connectedRole,
+          message: `Connected as ${connectedRole}`,
+        };
+      }
+      return {
+        ok: false,
+        httpCode,
+        message: data?.error || (httpCode === 401 ? 'Wrong token (HTTP 401 Unauthorized)' : `HTTP ${httpCode || 'Error'}`),
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        httpCode: 0,
+        message: err?.message || 'Unable to reach server.',
+      };
+    }
+  }
+
+  public async refreshRecentFromHuluBet(): Promise<{
+    ok: boolean;
+    updatedCount: number;
+    totalFetched: number;
+    httpCode: number;
+    error?: string;
+  }> {
+    const settings = await this.getSettings();
+    const targetUrl = (settings.serverUrl || '').trim();
+    const token = (settings.secretKey || '').trim();
+    if (!targetUrl || !token) {
+      return { ok: false, updatedCount: 0, totalFetched: 0, httpCode: 0, error: 'Server URL and token are required.' };
+    }
+
+    try {
+      const response = await fetch('/api/sync/recent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl, token, limit: 50 }),
+      });
+      const data = await response.json();
+      const httpCode = Number(data?.httpCode || response.status || 0);
+      if (!data?.ok) {
+        return {
+          ok: false,
+          updatedCount: 0,
+          totalFetched: 0,
+          httpCode,
+          error: data?.error || (httpCode === 401 ? 'Wrong token (HTTP 401)' : `HTTP ${httpCode}`),
+        };
+      }
+
+      const items: HuluBetNormalizedRecord[] = Array.isArray(data.items) ? data.items : [];
+      const payments = await this.getAllPayments(true);
+      const refMap = new Map<string, PaymentRecord[]>();
+      for (const p of payments) {
+        const candidates = [p.reference, p.ftNumber, p.v2Code, p.serverResult?.ref];
+        for (const c of candidates) {
+          const k = normalizeRefKey(c);
+          if (!k || k.startsWith('SMS-')) continue;
+          const arr = refMap.get(k) || [];
+          if (!arr.includes(p)) arr.push(p);
+          refMap.set(k, arr);
+        }
+      }
+
+      let updatedCount = 0;
+      const now = Date.now();
+      for (const item of items) {
+        const k = normalizeRefKey(item.ref);
+        if (!k) continue;
+        const matches = refMap.get(k);
+        if (!matches) continue;
+        for (const matchedPayment of matches) {
+          const smsId = Number(matchedPayment.id);
+          if (!Number.isFinite(smsId)) continue;
+          await mergeNativeServerResult(smsId, {
+            ...(item.ref ? { ref: item.ref } : {}),
+            ...(item.bank ? { bank: item.bank } : {}),
+            ...(item.type ? { type: item.type } : {}),
+            ...(item.amount !== undefined ? { amount: item.amount } : {}),
+            ...(item.balance !== undefined ? { balance: item.balance } : {}),
+            ...(item.agent ? { agent: item.agent } : {}),
+            ...(item.usage ? { usage: item.usage } : {}),
+            ...(item.claimed_by ? { claimed_by: item.claimed_by } : {}),
+            ...(item.claimed_txn_id ? { claimed_txn_id: item.claimed_txn_id } : {}),
+            lastCheckedAt: now,
+          });
+          updatedCount++;
+        }
+      }
+
+      return { ok: true, updatedCount, totalFetched: items.length, httpCode };
+    } catch (err: any) {
+      return {
+        ok: false,
+        updatedCount: 0,
+        totalFetched: 0,
+        httpCode: 0,
+        error: err?.message || 'Failed fetching /api/recent',
+      };
+    }
+  }
+
+  public async checkTransactionStatus(
+    paymentId: string,
+    ref: string
+  ): Promise<{ ok: boolean; record?: HuluBetNormalizedRecord | null; httpCode: number; error?: string }> {
+    const cleanRef = (ref || '').trim();
+    if (!cleanRef || cleanRef.startsWith('SMS-')) {
+      return { ok: false, httpCode: 0, error: 'No transaction reference to check.' };
+    }
+    const settings = await this.getSettings();
+    const targetUrl = (settings.serverUrl || '').trim();
+    const token = (settings.secretKey || '').trim();
+    if (!targetUrl || !token) {
+      return { ok: false, httpCode: 0, error: 'Server URL and token are required.' };
+    }
+
+    try {
+      const response = await fetch('/api/sync/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl, token, ref: cleanRef }),
+      });
+      const data = await response.json();
+      const httpCode = Number(data?.httpCode || response.status || 0);
+      if (!data?.ok) {
+        return {
+          ok: false,
+          httpCode,
+          error: data?.error || (httpCode === 401 ? 'Wrong token (HTTP 401)' : `HTTP ${httpCode}`),
+        };
+      }
+
+      const norm = data.record ? normalizeHuluBetServerRecord(data.record) : null;
+      const smsId = Number(paymentId);
+      if (norm && Number.isFinite(smsId)) {
+        await mergeNativeServerResult(smsId, {
+          ...(norm.ref ? { ref: norm.ref } : {}),
+          ...(norm.bank ? { bank: norm.bank } : {}),
+          ...(norm.type ? { type: norm.type } : {}),
+          ...(norm.amount !== undefined ? { amount: norm.amount } : {}),
+          ...(norm.balance !== undefined ? { balance: norm.balance } : {}),
+          ...(norm.agent ? { agent: norm.agent } : {}),
+          ...(norm.usage ? { usage: norm.usage } : {}),
+          ...(norm.claimed_by ? { claimed_by: norm.claimed_by } : {}),
+          ...(norm.claimed_txn_id ? { claimed_txn_id: norm.claimed_txn_id } : {}),
+          lastCheckedAt: Date.now(),
+        });
+      }
+      return { ok: true, record: norm, httpCode };
+    } catch (err: any) {
+      return { ok: false, httpCode: 0, error: err?.message || 'Failed checking /api/check' };
+    }
+  }
+
+  public async syncAllLocalToServer(): Promise<{ synced: number; needsReview: number; failed: number; error?: string }> {
     const settings = await this.getSettings();
     if (!settings.serverUrl?.trim()) {
-      return { synced: 0, ignored: 0, failed: 0, error: 'Server webhook URL is not configured in Settings.' };
+      return { synced: 0, needsReview: 0, failed: 0, error: 'HuluBet server URL is not configured in Settings.' };
     }
-    const payments = await this.getAllPayments(true);
+    const [payments, senderMap] = await Promise.all([this.getAllPayments(true), getNativeSenderBankMap()]);
     const unsynced = payments.filter(
-      p => !p.serverIgnored && (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed')
+      p =>
+        (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed') &&
+        isTelebirrOrCbeSms(p.senderAddress, p.rawMessage, senderMap)
     );
     let synced = 0;
-    let ignored = 0;
+    let needsReview = 0;
     let failed = 0;
 
     for (const p of unsynced) {
       const res = await this.syncPaymentToServer(p.id);
       if (res.ok) {
-        if (res.status === 'Ignored') ignored++;
+        if (res.needsReview) needsReview++;
         else synced++;
       } else {
         failed++;
+        if (res.authError) {
+          return { synced, needsReview, failed, error: res.message };
+        }
       }
     }
-    return { synced, ignored, failed };
+    return { synced, needsReview, failed };
   }
 
   /**
@@ -879,7 +1241,19 @@ class DatabaseService {
   }
 
   public async insertTestSms(sender: string, body: string): Promise<boolean> {
-    return insertNativeTestSms(sender, body);
+    const id = await insertNativeTestSmsWithId(sender, body);
+    if (id === null) return false;
+
+    const [settings, senderMap] = await Promise.all([this.getSettings(), getNativeSenderBankMap()]);
+    if (settings.mode === 'server' && settings.serverUrl?.trim()) {
+      if (isTelebirrOrCbeSms(sender, body, senderMap)) {
+        await this.syncPaymentToServer(String(id));
+      } else {
+        // Non-Telebirr/CBE SMS stays cleanly local
+        await updateNativeMessageStatus(id, 'local', 0, null, { incrementTries: false });
+      }
+    }
+    return true;
   }
 
   public async deletePayment(id: string): Promise<void> {
@@ -1422,9 +1796,12 @@ class DatabaseService {
       // while forcing mode: 'local' on import.
       const settingsToSave: Partial<AppSettings> = {
         serverUrl: incomingSettings.serverUrl || currentSettings.serverUrl,
-        httpMethod: incomingSettings.httpMethod || currentSettings.httpMethod,
+        httpMethod: 'GET',
         retryIntervalSeconds: incomingSettings.retryIntervalSeconds || currentSettings.retryIntervalSeconds,
         mode: 'local',
+        deviceRole: incomingSettings.deviceRole || currentSettings.deviceRole,
+        deviceLabel: incomingSettings.deviceLabel || currentSettings.deviceLabel,
+        roleTokens: incomingSettings.roleTokens || currentSettings.roleTokens,
         allowedSenders: Array.from(
           new Set([
             ...(currentSettings.allowedSenders || []),

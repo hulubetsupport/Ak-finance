@@ -12,14 +12,18 @@ import {
   Building2,
   Sparkles,
   CloudUpload,
+  Wifi,
+  RefreshCw,
+  UserCheck,
 } from 'lucide-react';
-import { AppSettings, AiModelId } from '../types/index.ts';
+import { AppSettings, AiModelId, DeviceRoleType } from '../types/index.ts';
 import {
   AI_CHAT_AND_PARSER_MODELS,
   GOOGLE_GEMINI_SPECIALIZED_MODELS,
   PAID_GEMINI_MODEL_IDS,
   resolveAllowedAiModel,
 } from '../constants/aiModels.ts';
+import { DEFAULT_HULUBET_SERVER_URL } from '../utils/hulubetSync.ts';
 import { translations } from '../utils/i18n.ts';
 import { db } from '../services/db.ts';
 import {
@@ -71,15 +75,24 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const isAm = settings.language === 'am';
 
   const [formData, setFormData] = useState(() => {
+    const initialRole: DeviceRoleType = settings.deviceRole === 'agent' ? 'agent' : 'owner';
+    const initialRoleTokens = {
+      owner: settings.roleTokens?.owner || (initialRole === 'owner' ? settings.secretKey : ''),
+      agent: settings.roleTokens?.agent || (initialRole === 'agent' ? settings.secretKey : ''),
+    };
     try {
       const saved = localStorage.getItem(DRAFT_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
+        const draftRole: DeviceRoleType = parsed.deviceRole === 'agent' ? 'agent' : initialRole;
+        const draftRoleTokens = parsed.roleTokens || initialRoleTokens;
         return {
-          serverUrl: parsed.serverUrl ?? settings.serverUrl,
-          secretKey: parsed.secretKey ?? settings.secretKey,
+          serverUrl: parsed.serverUrl || settings.serverUrl || DEFAULT_HULUBET_SERVER_URL,
+          secretKey: parsed.secretKey ?? draftRoleTokens[draftRole] ?? settings.secretKey ?? '',
           mode: parsed.mode ?? settings.mode,
-          httpMethod: parsed.httpMethod ?? settings.httpMethod ?? 'GET',
+          deviceRole: draftRole,
+          deviceLabel: parsed.deviceLabel ?? settings.deviceLabel ?? (draftRole === 'owner' ? 'Owner' : 'Agent 1'),
+          roleTokens: draftRoleTokens,
           retryIntervalSeconds: parsed.retryIntervalSeconds ?? settings.retryIntervalSeconds ?? 15,
           excludeHiddenFromTotal: parsed.excludeHiddenFromTotal ?? settings.excludeHiddenFromTotal ?? false,
           startHiddenAfterUnlock: parsed.startHiddenAfterUnlock ?? settings.startHiddenAfterUnlock ?? false,
@@ -90,10 +103,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       }
     } catch {}
     return {
-      serverUrl: settings.serverUrl,
-      secretKey: settings.secretKey,
+      serverUrl: settings.serverUrl || DEFAULT_HULUBET_SERVER_URL,
+      secretKey: settings.secretKey || initialRoleTokens[initialRole] || '',
       mode: settings.mode,
-      httpMethod: settings.httpMethod || 'GET',
+      deviceRole: initialRole,
+      deviceLabel: settings.deviceLabel || (initialRole === 'owner' ? 'Owner' : 'Agent 1'),
+      roleTokens: initialRoleTokens,
       retryIntervalSeconds: settings.retryIntervalSeconds || 15,
       excludeHiddenFromTotal: settings.excludeHiddenFromTotal ?? false,
       startHiddenAfterUnlock: settings.startHiddenAfterUnlock ?? false,
@@ -106,6 +121,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [senderBankMap, setSenderBankMap] = useState<Record<string, string>>({});
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [syncingAll, setSyncingAll] = useState(false);
+  const [testingConn, setTestingConn] = useState(false);
+  const [testConnResult, setTestConnResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [permissions, setPermissions] = useState<{ smsGranted: boolean; notificationsGranted: boolean }>({
     smsGranted: true,
     notificationsGranted: true,
@@ -130,12 +147,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   useEffect(() => {
     if (!isDirtyRef.current) {
+      const role: DeviceRoleType = settings.deviceRole === 'agent' ? 'agent' : 'owner';
       setFormData(prev => ({
         ...prev,
-        serverUrl: settings.serverUrl,
+        serverUrl: settings.serverUrl || DEFAULT_HULUBET_SERVER_URL,
         secretKey: settings.secretKey,
         mode: settings.mode,
-        httpMethod: settings.httpMethod || 'GET',
+        deviceRole: role,
+        deviceLabel: settings.deviceLabel || (role === 'owner' ? 'Owner' : 'Agent 1'),
+        roleTokens: settings.roleTokens || prev.roleTokens,
         retryIntervalSeconds: settings.retryIntervalSeconds || 15,
         excludeHiddenFromTotal: settings.excludeHiddenFromTotal ?? false,
         startHiddenAfterUnlock: settings.startHiddenAfterUnlock ?? false,
@@ -148,7 +168,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     settings.serverUrl,
     settings.secretKey,
     settings.mode,
-    settings.httpMethod,
+    settings.deviceRole,
+    settings.deviceLabel,
+    settings.roleTokens,
     settings.retryIntervalSeconds,
     settings.excludeHiddenFromTotal,
     settings.startHiddenAfterUnlock,
@@ -167,12 +189,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setSaveStatus('saving');
     try {
       const sendersList = Object.keys(senderBankMap);
+      const updatedRoleTokens = {
+        ...dataToSave.roleTokens,
+        [dataToSave.deviceRole]: dataToSave.secretKey.trim(),
+      };
       await onUpdateSettings({
-        serverUrl: dataToSave.serverUrl.trim(),
+        serverUrl: dataToSave.serverUrl.trim() || DEFAULT_HULUBET_SERVER_URL,
         secretKey: dataToSave.secretKey.trim(),
+        httpMethod: 'GET',
+        deviceRole: dataToSave.deviceRole,
+        deviceLabel: dataToSave.deviceLabel.trim() || (dataToSave.deviceRole === 'owner' ? 'Owner' : 'Agent 1'),
+        roleTokens: updatedRoleTokens,
         allowedSenders: sendersList.length > 0 ? sendersList : ['CBE', '127', 'Telebirr', 'AwashBank', 'Dashen', 'BOA'],
         mode: dataToSave.mode,
-        httpMethod: dataToSave.httpMethod,
         retryIntervalSeconds: Number(dataToSave.retryIntervalSeconds) || 15,
         excludeHiddenFromTotal: dataToSave.excludeHiddenFromTotal,
         startHiddenAfterUnlock: dataToSave.startHiddenAfterUnlock,
@@ -199,8 +228,56 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   const handleFieldChange = (field: keyof typeof formData, value: any) => {
     const updated = { ...formData, [field]: value };
+    if (field === 'secretKey') {
+      updated.roleTokens = {
+        ...updated.roleTokens,
+        [updated.deviceRole]: String(value || ''),
+      };
+      setTestConnResult(null);
+    }
     setFormData(updated);
     triggerDebouncedAutoSave(updated);
+  };
+
+  const handleSwitchDeviceRole = (nextRole: DeviceRoleType) => {
+    const nextRoleTokens = {
+      ...formData.roleTokens,
+      [formData.deviceRole]: formData.secretKey,
+    };
+    const nextToken = nextRoleTokens[nextRole] || '';
+    const nextLabel =
+      nextRole === 'owner'
+        ? 'Owner'
+        : formData.deviceLabel && formData.deviceLabel !== 'Owner'
+          ? formData.deviceLabel
+          : 'Agent 1';
+    const updated = {
+      ...formData,
+      deviceRole: nextRole,
+      deviceLabel: nextLabel,
+      roleTokens: nextRoleTokens,
+      secretKey: nextToken,
+    };
+    setTestConnResult(null);
+    setFormData(updated);
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    performSave(updated);
+  };
+
+  const handleTestConnection = async () => {
+    setTestingConn(true);
+    setTestConnResult(null);
+    await performSave(formData);
+    try {
+      const res = await db.testHuluBetConnection(
+        formData.serverUrl.trim() || DEFAULT_HULUBET_SERVER_URL,
+        formData.secretKey.trim(),
+        formData.deviceLabel.trim() || (formData.deviceRole === 'owner' ? 'Owner' : 'Agent 1')
+      );
+      setTestConnResult({ ok: res.ok, message: res.message });
+    } finally {
+      setTestingConn(false);
+    }
   };
 
   const handleBlur = () => {
@@ -380,10 +457,13 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </label>
         </div>
 
-        {/* Server Webhook Config */}
+        {/* HuluBet Server Sync Config */}
         <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-200 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-slate-900">Server Webhook (Optional)</span>
+            <div className="flex items-center gap-1.5">
+              <UserCheck size={14} className="text-[#0F4C3A]" />
+              <span className="text-xs font-bold text-slate-900">HuluBet Server Sync (GET)</span>
+            </div>
             {onTriggerSyncAll && (
               <button
                 type="button"
@@ -404,55 +484,108 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             )}
           </div>
 
+          {/* Device Role Selector (Owner / Agent with independent tokens) */}
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-slate-700 block">
+              Device Role (each phone uses its own token)
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => handleSwitchDeviceRole('owner')}
+                className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                  formData.deviceRole === 'owner'
+                    ? 'bg-[#0F4C3A] border-[#0F4C3A] text-white'
+                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Owner
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchDeviceRole('agent')}
+                className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                  formData.deviceRole === 'agent'
+                    ? 'bg-[#0F4C3A] border-[#0F4C3A] text-white'
+                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Agent
+              </button>
+            </div>
+
+            {formData.deviceRole === 'agent' && (
+              <div className="space-y-1">
+                <label htmlFor="settings-device-label" className="text-[11px] font-semibold text-slate-600 block">
+                  Custom Agent Label
+                </label>
+                <input
+                  id="settings-device-label"
+                  type="text"
+                  value={formData.deviceLabel}
+                  onChange={e => handleFieldChange('deviceLabel', e.target.value)}
+                  onBlur={handleBlur}
+                  placeholder="e.g. Agent 1"
+                  className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:border-[#0F4C3A]"
+                />
+              </div>
+            )}
+          </div>
+
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-slate-700">{t.serverUrl}</label>
+            <label htmlFor="settings-server-url" className="text-xs font-semibold text-slate-700">
+              Server URL
+            </label>
             <input
+              id="settings-server-url"
               type="url"
               value={formData.serverUrl}
               onChange={e => handleFieldChange('serverUrl', e.target.value)}
               onBlur={handleBlur}
               className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:border-[#0F4C3A]"
-              placeholder="https://example.com/api/save_sms"
+              placeholder={DEFAULT_HULUBET_SERVER_URL}
             />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-slate-700">{t.secretKey}</label>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="settings-role-token" className="text-xs font-semibold text-slate-700">
+                {formData.deviceRole === 'owner' ? 'Owner Token' : `${formData.deviceLabel || 'Agent'} Token`}
+              </label>
+              <span className="text-[11px] text-slate-500 font-mono">GET · Backoff 15s–5m</span>
+            </div>
+            <div className="flex items-center gap-2">
               <input
+                id="settings-role-token"
                 type="text"
                 value={formData.secretKey}
                 onChange={e => handleFieldChange('secretKey', e.target.value)}
                 onBlur={handleBlur}
-                className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:border-[#0F4C3A]"
-                placeholder="ak_secret_key_..."
+                className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-mono text-slate-900 focus:outline-none focus:border-[#0F4C3A]"
+                placeholder={`Paste ${formData.deviceRole === 'owner' ? 'Owner' : 'Agent'} token...`}
               />
+              <button
+                type="button"
+                disabled={testingConn || !formData.serverUrl.trim()}
+                onClick={handleTestConnection}
+                className="px-3 py-2 rounded-lg border border-[#0F4C3A] bg-white text-[#0F4C3A] hover:bg-emerald-50 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                {testingConn ? <RefreshCw size={13} className="animate-spin" /> : <Wifi size={13} />}
+                <span>{testingConn ? 'Testing...' : 'Test Connection'}</span>
+              </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700">HTTP Method</label>
-                <select
-                  value={formData.httpMethod}
-                  onChange={e => handleFieldChange('httpMethod', e.target.value)}
-                  className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800"
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                </select>
+            {testConnResult && (
+              <div
+                className={`px-3 py-2 rounded-lg border text-xs font-semibold ${
+                  testConnResult.ok
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-800'
+                }`}
+              >
+                {testConnResult.message}
               </div>
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700">Retry (s)</label>
-                <input
-                  type="number"
-                  min={5}
-                  value={formData.retryIntervalSeconds}
-                  onChange={e => handleFieldChange('retryIntervalSeconds', Number(e.target.value))}
-                  onBlur={handleBlur}
-                  className="w-full px-2.5 py-2 rounded-lg border border-slate-200 bg-white text-xs font-mono text-slate-800"
-                />
-              </div>
-            </div>
+            )}
           </div>
         </div>
 

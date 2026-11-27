@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import { AI_CHAT_AND_PARSER_MODELS, resolveAllowedAiModel } from './src/constants/aiModels.ts';
+import {
+  resolveHuluBetEndpointUrl,
+  normalizeHuluBetServerRecord,
+  extractRecentArrayFromPayload,
+} from './src/utils/hulubetSync.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -351,86 +356,207 @@ Rules:
     });
   });
 
-  // Server Sync Forwarder (avoids browser CORS when syncing local-storage SMS to user's webhook)
+  // HuluBet SMS Webhook Forwarder (always GET /webhook/sms?token=T&sender=S&message=...)
   app.post('/api/sync/forward', async (req, res) => {
-    const { url, serverUrl, token, method, sender, message, ts } = req.body || {};
+    const { url, serverUrl, token, sender, message } = req.body || {};
     const targetInputUrl = typeof url === 'string' && url.trim() ? url.trim() : typeof serverUrl === 'string' ? serverUrl.trim() : '';
     if (!targetInputUrl || !isSafeExternalUrl(targetInputUrl)) {
-      res.status(400).json({ ok: false, httpCode: 0, status: 'Unknown', error: 'Invalid or unsafe server webhook URL.' });
+      res.status(400).json({ ok: false, httpCode: 0, status: 'Unknown', error: 'Invalid or unsafe server URL.' });
       return;
     }
 
     try {
+      const endpointBase = resolveHuluBetEndpointUrl(targetInputUrl, '/webhook/sms');
+      const fullUrl =
+        `${endpointBase}?token=${encodeURIComponent(String(token || ''))}` +
+        `&sender=${encodeURIComponent(String(sender || ''))}` +
+        `&message=${encodeURIComponent(String(message || ''))}`;
+
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 12000);
-      const httpMethod = method === 'POST' ? 'POST' : 'GET';
-      let response: Response;
-
-      if (httpMethod === 'POST') {
-        response = await fetch(targetInputUrl, {
-          method: 'POST',
-          signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'save_sms',
-            token: String(token || ''),
-            sender: String(sender || ''),
-            message: String(message || ''),
-            ts: Number(ts) || Date.now(),
-          }),
-        });
-      } else {
-        const target = new URL(targetInputUrl);
-        target.searchParams.set('action', 'save_sms');
-        if (token) target.searchParams.set('token', String(token));
-        target.searchParams.set('sender', String(sender || ''));
-        target.searchParams.set('message', String(message || ''));
-        response = await fetch(target.toString(), {
-          method: 'GET',
-          signal: controller.signal,
-        });
-      }
+      const response = await fetch(fullUrl, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
       clearTimeout(timer);
 
       const rawText = await response.text();
-      let parsed: Record<string, unknown> = {};
+      let parsedJson: Record<string, unknown> = {};
       try {
-        parsed = JSON.parse(rawText);
+        parsedJson = JSON.parse(rawText);
       } catch {
         // non-JSON reply
       }
 
-      const rawStatus = String(parsed.status || '').toLowerCase();
+      const rawStatus = String(parsedJson.status || '').toLowerCase();
       let mappedStatus: 'Saved' | 'Duplicate' | 'Ignored' | 'Unknown' = 'Unknown';
-      if (rawStatus.includes('save') || rawStatus === 'ok' || rawStatus === 'success') mappedStatus = 'Saved';
-      else if (rawStatus.includes('dup')) mappedStatus = 'Duplicate';
-      else if (rawStatus.includes('ignor')) mappedStatus = 'Ignored';
+      if (rawStatus === 'saved' || rawStatus.includes('save') || rawStatus === 'ok' || rawStatus === 'success') mappedStatus = 'Saved';
+      else if (rawStatus === 'duplicate' || rawStatus.includes('dup')) mappedStatus = 'Duplicate';
+      else if (rawStatus === 'ignored' || rawStatus.includes('ignor')) mappedStatus = 'Ignored';
       else if (response.ok && !rawText.toLowerCase().includes('ignored')) mappedStatus = 'Saved';
 
-      const refVal = typeof parsed.ref === 'string' ? parsed.ref : undefined;
-      const reasonVal = typeof parsed.reason === 'string' ? parsed.reason : undefined;
+      const norm = normalizeHuluBetServerRecord(parsedJson) || {};
+      const errDetail =
+        typeof parsedJson.error === 'string'
+          ? parsedJson.error
+          : typeof parsedJson.message === 'string' && !response.ok
+            ? parsedJson.message
+            : !response.ok
+              ? response.status === 401
+                ? 'Wrong token (HTTP 401 Unauthorized)'
+                : `HTTP ${response.status} ${response.statusText || ''}`.trim()
+              : undefined;
 
       res.json({
         ok: response.ok,
         httpCode: response.status,
         status: mappedStatus,
-        ref: refVal,
-        reason: reasonVal,
+        reason: norm.reason,
+        ref: norm.ref,
+        bank: norm.bank,
+        type: norm.type,
+        amount: norm.amount,
+        balance: norm.balance,
+        agent: norm.agent,
+        usage: norm.usage,
+        claimed_by: norm.claimed_by,
+        claimed_txn_id: norm.claimed_txn_id,
+        error: errDetail,
         raw: rawText,
         parsed: {
           status: mappedStatus,
-          ref: refVal,
-          reason: reasonVal,
+          ...norm,
         },
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Network error reaching webhook server';
+      const msg = err instanceof Error ? err.message : 'Network error reaching HuluBet server';
       res.status(502).json({
         ok: false,
         httpCode: 0,
         status: 'Unknown',
         error: msg,
       });
+    }
+  });
+
+  // HuluBet Recent List & Test Connection (/api/recent?token=T&limit=50)
+  app.post('/api/sync/recent', async (req, res) => {
+    const { url, serverUrl, token, limit } = req.body || {};
+    const targetInputUrl = typeof url === 'string' && url.trim() ? url.trim() : typeof serverUrl === 'string' ? serverUrl.trim() : '';
+    if (!targetInputUrl || !isSafeExternalUrl(targetInputUrl)) {
+      res.status(400).json({ ok: false, httpCode: 0, items: [], error: 'Invalid or unsafe server URL.' });
+      return;
+    }
+
+    const boundedLimit = Math.min(100, Math.max(1, Number(limit) || 50));
+
+    try {
+      const endpointBase = resolveHuluBetEndpointUrl(targetInputUrl, '/api/recent');
+      const fullUrl = `${endpointBase}?token=${encodeURIComponent(String(token || ''))}&limit=${boundedLimit}`;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(fullUrl, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+      clearTimeout(timer);
+
+      const rawText = await response.text();
+      let parsedJson: any = {};
+      try {
+        parsedJson = JSON.parse(rawText);
+      } catch {
+        // non-JSON reply
+      }
+
+      const items = response.ok ? extractRecentArrayFromPayload(parsedJson) : [];
+      const topAgent =
+        typeof parsedJson?.agent === 'string' && parsedJson.agent.trim()
+          ? parsedJson.agent.trim()
+          : typeof parsedJson?.role === 'string' && parsedJson.role.trim()
+            ? parsedJson.role.trim()
+            : items.find(i => i.agent)?.agent;
+
+      const errDetail = !response.ok
+        ? typeof parsedJson?.error === 'string'
+          ? parsedJson.error
+          : typeof parsedJson?.message === 'string'
+            ? parsedJson.message
+            : response.status === 401
+              ? 'Wrong token (HTTP 401 Unauthorized)'
+              : `HTTP ${response.status}`
+        : undefined;
+
+      res.json({
+        ok: response.ok,
+        httpCode: response.status,
+        agent: topAgent,
+        items,
+        error: errDetail,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error connecting to HuluBet server';
+      res.status(502).json({ ok: false, httpCode: 0, items: [], error: msg });
+    }
+  });
+
+  // HuluBet Single Ref Check (/api/check?token=T&ref=REF)
+  app.post('/api/sync/check', async (req, res) => {
+    const { url, serverUrl, token, ref } = req.body || {};
+    const targetInputUrl = typeof url === 'string' && url.trim() ? url.trim() : typeof serverUrl === 'string' ? serverUrl.trim() : '';
+    const cleanRef = typeof ref === 'string' ? ref.trim() : '';
+    if (!targetInputUrl || !isSafeExternalUrl(targetInputUrl)) {
+      res.status(400).json({ ok: false, httpCode: 0, error: 'Invalid or unsafe server URL.' });
+      return;
+    }
+    if (!cleanRef) {
+      res.status(400).json({ ok: false, httpCode: 0, error: 'Transaction reference is required.' });
+      return;
+    }
+
+    try {
+      const endpointBase = resolveHuluBetEndpointUrl(targetInputUrl, '/api/check');
+      const fullUrl = `${endpointBase}?token=${encodeURIComponent(String(token || ''))}&ref=${encodeURIComponent(cleanRef)}`;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(fullUrl, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+      clearTimeout(timer);
+
+      const rawText = await response.text();
+      let parsedJson: any = {};
+      try {
+        parsedJson = JSON.parse(rawText);
+      } catch {
+        // non-JSON reply
+      }
+
+      const candidateObj = parsedJson?.transaction || parsedJson?.item || parsedJson?.data || parsedJson;
+      const normalized = response.ok ? normalizeHuluBetServerRecord(candidateObj) : null;
+      const errDetail = !response.ok
+        ? typeof parsedJson?.error === 'string'
+          ? parsedJson.error
+          : response.status === 401
+            ? 'Wrong token (HTTP 401 Unauthorized)'
+            : `HTTP ${response.status}`
+        : undefined;
+
+      res.json({
+        ok: response.ok,
+        httpCode: response.status,
+        record: normalized,
+        error: errDetail,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error checking reference';
+      res.status(502).json({ ok: false, httpCode: 0, error: msg });
     }
   });
 

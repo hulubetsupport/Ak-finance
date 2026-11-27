@@ -33,7 +33,7 @@ import { translations } from '../utils/i18n.ts';
 import { getBankBrand, BankBrand } from '../constants/bankBrands.ts';
 import { needsFtRecovery } from '../utils/smsParser.ts';
 
-export type LedgerStatusFilter = 'all' | 'saved' | 'local' | 'server-ignored' | 'alert' | 'duplicate';
+export type LedgerStatusFilter = 'all' | 'saved' | 'local' | 'needs-review' | 'sync-error' | 'alert' | 'duplicate';
 
 interface PaymentsListProps {
   payments: PaymentRecord[];
@@ -57,6 +57,9 @@ interface PaymentsListProps {
   onSyncPayment?: (id: string) => Promise<{ ok: boolean; status: string; message: string }>;
   onSyncSelected?: (ids: string[]) => Promise<void>;
   onAiParsePayment?: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onRefreshServerStatus?: () => Promise<void>;
+  refreshingServerStatus?: boolean;
+  onCheckTransactionStatus?: (payment: PaymentRecord) => Promise<{ ok: boolean; error?: string }>;
   serverUrlConfigured?: boolean;
   initialStatusFilter?: LedgerStatusFilter;
   onOpenSettings?: () => void;
@@ -73,13 +76,18 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   onSyncPayment,
   onSyncSelected,
   onAiParsePayment,
+  onRefreshServerStatus,
+  refreshingServerStatus = false,
+  onCheckTransactionStatus,
   serverUrlConfigured = false,
   initialStatusFilter,
   onOpenSettings,
   maxItems,
 }) => {
   const [selectedPayment, setSelectedPayment] = useState<PaymentRecord | null>(null);
+  const [checkingModalStatus, setCheckingModalStatus] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedRef, setCopiedRef] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [aiParsingId, setAiParsingId] = useState<string | null>(null);
@@ -129,6 +137,15 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     }
   }, [initialStatusFilter]);
 
+  // Keep open Transaction Desk modal synchronized with latest background poll / /api/check results
+  useEffect(() => {
+    if (!selectedPayment) return;
+    const updated = payments.find(p => p.id === selectedPayment.id);
+    if (updated && updated !== selectedPayment) {
+      setSelectedPayment(updated);
+    }
+  }, [payments, selectedPayment]);
+
   const t = translations[settings.language];
   const isAm = settings.language === 'am';
 
@@ -140,22 +157,24 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   const counts = useMemo(() => {
     let saved = 0;
     let localOnly = 0;
-    let serverIgnored = 0;
+    let needsReview = 0;
+    let syncErrors = 0;
     let alerts = 0;
     let dupes = 0;
     let received = 0;
     let sent = 0;
 
     for (const p of payments) {
-      if (p.syncStatus === 'sent' && !p.serverIgnored) saved++;
-      if (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed') localOnly++;
-      if (p.serverIgnored) serverIgnored++;
+      if (p.syncStatus === 'sent' && !p.needsReview) saved++;
+      if (p.syncStatus === 'local' || p.syncStatus === 'pending') localOnly++;
+      if (p.needsReview) needsReview++;
+      if (p.syncStatus === 'failed' || p.authError) syncErrors++;
       if (p.category === 'alert' || p.amount === 0) alerts++;
       if (p.isDuplicate || p.serverResult?.status === 'Duplicate') dupes++;
       if (p.type === 'received' && p.category !== 'alert') received++;
       if (p.type === 'sent' && p.category !== 'alert') sent++;
     }
-    return { saved, localOnly, serverIgnored, alerts, dupes, received, sent };
+    return { saved, localOnly, needsReview, syncErrors, alerts, dupes, received, sent };
   }, [payments]);
 
   const handleSetDirection = (dir: 'all' | 'received' | 'sent') => {
@@ -188,9 +207,10 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         if (selectedCategory === 'alert' && !isItemAlert) return false;
       }
 
-      if (statusFilter === 'saved' && (p.syncStatus !== 'sent' || p.serverIgnored)) return false;
-      if (statusFilter === 'local' && p.syncStatus !== 'local' && p.syncStatus !== 'pending' && p.syncStatus !== 'failed') return false;
-      if (statusFilter === 'server-ignored' && !p.serverIgnored) return false;
+      if (statusFilter === 'saved' && (p.syncStatus !== 'sent' || p.needsReview)) return false;
+      if (statusFilter === 'local' && p.syncStatus !== 'local' && p.syncStatus !== 'pending') return false;
+      if (statusFilter === 'needs-review' && !p.needsReview) return false;
+      if (statusFilter === 'sync-error' && p.syncStatus !== 'failed' && !p.authError) return false;
       if (statusFilter === 'alert' && !isItemAlert) return false;
       if (statusFilter === 'duplicate' && !p.isDuplicate && p.serverResult?.status !== 'Duplicate') return false;
 
@@ -204,6 +224,9 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
           p.bank,
           p.rawMessage,
           p.tag,
+          p.serverResult?.claimed_by,
+          p.serverResult?.claimed_txn_id,
+          p.serverResult?.agent,
           String(p.amount || 0),
         ]
           .filter(Boolean)
@@ -247,26 +270,71 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     return `${day} ${month} ${hours}:${mins}`;
   };
 
-  const getStatusLabel = (item: PaymentRecord): { label: string; colorClass: string } => {
+  const getHuluBetPill = (item: PaymentRecord): { label: string; sub?: string; pillClass: string } => {
+    if (item.needsReview) {
+      return {
+        label: 'Needs review',
+        sub: item.needsReviewReason,
+        pillClass: 'bg-amber-100 text-amber-900 border-amber-300',
+      };
+    }
+    if (item.authError || item.syncStatus === 'failed') {
+      return {
+        label: item.authError ? 'Wrong Token (401)' : 'Sync Error',
+        sub: item.errorMessage,
+        pillClass: 'bg-rose-100 text-rose-800 border-rose-300',
+      };
+    }
+    const usage = item.serverResult?.usage;
+    if (usage === 'Unused') {
+      return {
+        label: 'Unused',
+        sub: 'waiting for player',
+        pillClass: 'bg-amber-50 text-amber-800 border-amber-200',
+      };
+    }
+    if (usage === 'Used') {
+      return {
+        label: item.serverResult?.claimed_by ? `Used · Claimed by ${item.serverResult.claimed_by}` : 'Used',
+        sub: item.serverResult?.claimed_txn_id ? item.serverResult.claimed_txn_id : undefined,
+        pillClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      };
+    }
+    if (usage === 'Sent_Locked') {
+      return {
+        label: 'Sent_Locked',
+        pillClass: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+      };
+    }
+    if (usage === 'Payout_Verified') {
+      return {
+        label: 'Payout_Verified',
+        sub: [item.serverResult?.claimed_txn_id, item.serverResult?.claimed_by].filter(Boolean).join(' · ') || undefined,
+        pillClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      };
+    }
     if (item.category === 'alert' || item.amount === 0) {
-      return { label: isAm ? 'ማሳወቂያ' : 'Notice', colorClass: 'text-slate-500' };
-    }
-    if (item.serverIgnored) {
-      return { label: 'Server Ignored', colorClass: 'text-amber-700' };
-    }
-    if (item.serverResult?.status === 'Duplicate' || item.isDuplicate) {
-      return { label: 'Duplicate', colorClass: 'text-amber-700' };
+      return {
+        label: isAm ? 'ማሳወቂያ' : 'Notice',
+        pillClass: 'bg-slate-100 text-slate-600 border-slate-200',
+      };
     }
     if (item.syncStatus === 'sent') {
-      return { label: t.statusSynced, colorClass: 'text-emerald-700' };
-    }
-    if (item.syncStatus === 'failed') {
-      return { label: t.statusFailed, colorClass: 'text-rose-700' };
+      return {
+        label: item.serverResult?.status === 'Duplicate' ? 'Synced (Duplicate)' : t.statusSynced,
+        pillClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      };
     }
     if (item.syncStatus === 'pending') {
-      return { label: t.statusPending, colorClass: 'text-amber-700' };
+      return {
+        label: 'Queued',
+        pillClass: 'bg-amber-50 text-amber-700 border-amber-200',
+      };
     }
-    return { label: t.statusLocal, colorClass: 'text-slate-600' };
+    return {
+      label: t.statusLocal,
+      pillClass: 'bg-slate-100 text-slate-600 border-slate-200',
+    };
   };
 
   const getRowTitle = (item: PaymentRecord): string => {
@@ -491,15 +559,32 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
     }
   };
 
-  const openPaymentModal = (payment: PaymentRecord) => {
+  const openPaymentModal = async (payment: PaymentRecord) => {
     setSelectedPayment(payment);
     setModalView('details');
     setIsEditing(false);
+    setCopiedRef(false);
     setEditCounterparty(payment.counterparty || '');
     setEditDirection(payment.type);
     setEditCategory(payment.category || 'transfer');
     setEditNote(payment.note || '');
     setEditTag(payment.tag || '');
+
+    if (onCheckTransactionStatus && payment.reference && !payment.reference.startsWith('SMS-') && serverUrlConfigured) {
+      setCheckingModalStatus(true);
+      try {
+        await onCheckTransactionStatus(payment);
+      } finally {
+        setCheckingModalStatus(false);
+      }
+    }
+  };
+
+  const handleCopyRefOnly = (refStr: string) => {
+    if (!refStr) return;
+    navigator.clipboard.writeText(refStr);
+    setCopiedRef(true);
+    setTimeout(() => setCopiedRef(false), 2000);
   };
 
   const openInlineNameEdit = (payment: PaymentRecord) => {
@@ -628,10 +713,10 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
   };
 
   const statusTabs: { id: LedgerStatusFilter; label: string; count?: number }[] = [
-    { id: 'all', label: isAm ? 'ሁሉም' : 'All' },
+    { id: 'all', label: isAm ? 'ሁሉም' : 'All Status' },
+    ...(counts.needsReview > 0 ? [{ id: 'needs-review' as const, label: 'Needs review', count: counts.needsReview }] : []),
     { id: 'saved', label: isAm ? 'የተላኩ' : 'Synced', count: counts.saved },
     { id: 'local', label: isAm ? 'በስልክ' : 'Local Only', count: counts.localOnly },
-    { id: 'server-ignored', label: isAm ? 'ሰርቨር የተዋቸው' : 'Server Ignored', count: counts.serverIgnored },
     { id: 'alert', label: isAm ? 'ማሳወቂያ' : 'Alerts', count: counts.alerts },
     { id: 'duplicate', label: 'Duplicate', count: counts.dupes },
   ];
@@ -666,6 +751,19 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          {onRefreshServerStatus && (
+            <button
+              type="button"
+              disabled={refreshingServerStatus}
+              onClick={onRefreshServerStatus}
+              className="min-h-[34px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-[#0F4C3A] hover:bg-emerald-50 flex items-center gap-1 whitespace-nowrap shrink-0 disabled:opacity-50"
+              title="Refresh HuluBet server status"
+            >
+              <RefreshCw size={13} className={refreshingServerStatus ? 'animate-spin' : ''} />
+              <span className="hidden sm:inline">{refreshingServerStatus ? 'Refreshing...' : 'Refresh'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setShowSortControls(prev => !prev)}
@@ -722,13 +820,18 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
         </div>
       </div>
 
-      {/* Direction Segmented Control */}
-      <div className="grid grid-cols-3 gap-1 p-1 bg-slate-200/70 rounded-xl">
+      {/* Primary Filter Bar: All | Deposits (In) | Withdrawals (Out) | Sync Errors */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 bg-slate-200/70 rounded-xl">
         <button
           type="button"
-          onClick={() => handleSetDirection('all')}
+          onClick={() => {
+            setStatusFilter('all');
+            handleSetDirection('all');
+          }}
           className={`min-h-[36px] px-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-            currentDirection === 'all' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+            currentDirection === 'all' && statusFilter !== 'sync-error'
+              ? 'bg-white text-slate-900 shadow-xs'
+              : 'text-slate-600 hover:text-slate-900'
           }`}
         >
           {isAm ? 'ሁሉም' : 'All'} · {payments.length}
@@ -736,26 +839,54 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
         <button
           type="button"
-          onClick={() => handleSetDirection('received')}
+          onClick={() => {
+            if (statusFilter === 'sync-error') setStatusFilter('all');
+            handleSetDirection('received');
+          }}
           className={`min-h-[36px] px-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-            currentDirection === 'received' ? 'bg-[#0F4C3A] text-white' : 'text-emerald-900 hover:bg-white/60'
+            currentDirection === 'received' && statusFilter !== 'sync-error'
+              ? 'bg-[#0F4C3A] text-white'
+              : 'text-emerald-900 hover:bg-white/60'
           }`}
         >
-          {isAm ? 'ገቢ' : 'Received'} · {counts.received}
+          Deposits (In) · {counts.received}
         </button>
 
         <button
           type="button"
-          onClick={() => handleSetDirection('sent')}
+          onClick={() => {
+            if (statusFilter === 'sync-error') setStatusFilter('all');
+            handleSetDirection('sent');
+          }}
           className={`min-h-[36px] px-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-            currentDirection === 'sent' ? 'bg-slate-900 text-white' : 'text-rose-900 hover:bg-white/60'
+            currentDirection === 'sent' && statusFilter !== 'sync-error'
+              ? 'bg-slate-900 text-white'
+              : 'text-rose-900 hover:bg-white/60'
           }`}
         >
-          {isAm ? 'ወጪ' : 'Sent'} · {counts.sent}
+          Withdrawals (Out) · {counts.sent}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            handleSetDirection('all');
+            setStatusFilter('sync-error');
+            setVisibleCount(maxItems || 50);
+          }}
+          className={`min-h-[36px] px-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+            statusFilter === 'sync-error'
+              ? 'bg-rose-700 text-white'
+              : counts.syncErrors > 0
+                ? 'text-rose-800 hover:bg-rose-50'
+                : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Sync Errors · {counts.syncErrors}
         </button>
       </div>
 
-      {/* Status Filter Strip (Includes Server Ignored!) */}
+      {/* Secondary Status Filter Strip */}
       <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
         {statusTabs.map(st => (
           <button
@@ -767,10 +898,10 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
             }}
             className={`min-h-[32px] px-2.5 py-1 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
               statusFilter === st.id
-                ? st.id === 'server-ignored'
+                ? st.id === 'needs-review'
                   ? 'bg-amber-700 text-white border-amber-700'
                   : 'bg-slate-900 text-white border-slate-900'
-                : st.id === 'server-ignored' && (st.count || 0) > 0
+                : st.id === 'needs-review'
                   ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
                   : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
             }`}
@@ -944,7 +1075,8 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
           const isAlert = item.category === 'alert' || item.amount === 0;
           const rowTitle = getRowTitle(item);
           const isSelected = selectedIds.has(item.id);
-          const statusMeta = getStatusLabel(item);
+          const pillMeta = getHuluBetPill(item);
+          const agentLabel = item.serverResult?.agent || (item.syncStatus === 'sent' ? settings.deviceLabel : undefined);
           const showFtRetry = needsFtRecovery(item);
           const showAiExtract =
             Boolean(onAiParsePayment) &&
@@ -990,6 +1122,29 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                 )}
 
                 <div className="min-w-0 flex-1 space-y-1">
+                  {/* Top Badge Strip: IN/OUT + Bank + Owner/Agent */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {!isAlert && (isReceived || isSent) && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border ${
+                          isReceived
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : 'bg-rose-50 text-rose-800 border-rose-200'
+                        }`}
+                      >
+                        {isReceived ? 'IN' : 'OUT'}
+                      </span>
+                    )}
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-[10px] font-semibold text-slate-700">
+                      {item.bank}
+                    </span>
+                    {agentLabel && (
+                      <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-[10px] font-semibold text-slate-700">
+                        {agentLabel}
+                      </span>
+                    )}
+                  </div>
+
                   <div className="flex items-center gap-2 min-w-0">
                     <button
                       type="button"
@@ -1009,10 +1164,8 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     </button>
                   </div>
 
-                  {/* Single Inline Metadata Line (Zero static pills — separated by ·) */}
+                  {/* Single Inline Metadata Line (separated by ·) */}
                   <div className="text-xs text-slate-500 font-mono truncate">
-                    <span className="font-semibold text-slate-700">{brand.shortCode}</span>
-                    <span> · </span>
                     <span>{formatDateTime(item.timestamp)}</span>
                     {item.reference && (
                       <>
@@ -1045,6 +1198,13 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                       </>
                     )}
                   </div>
+
+                  {/* Error / Needs Review Reason (shown only when present) */}
+                  {(item.needsReviewReason || ((item.syncStatus === 'failed' || item.authError) && item.errorMessage)) && (
+                    <div className={`text-[11px] font-medium ${item.needsReview ? 'text-amber-800' : 'text-rose-700'}`}>
+                      {item.needsReview ? item.needsReviewReason : item.errorMessage}
+                    </div>
+                  )}
 
                   {/* Conditional Action Links Row */}
                   {(item.suggestedTag || showFtRetry || item.receiptUrl || showAiExtract || item.syncStatus !== 'sent') && (
@@ -1080,7 +1240,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                           className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-[#0F4C3A] hover:underline whitespace-nowrap disabled:opacity-50"
                         >
                           <UploadCloud size={11} />
-                          <span>{syncingId === item.id ? 'Syncing...' : 'Sync'}</span>
+                          <span>{syncingId === item.id ? 'Syncing...' : item.syncStatus === 'failed' ? 'Retry' : 'Sync'}</span>
                         </button>
                       )}
 
@@ -1110,11 +1270,11 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                 </div>
               </div>
 
-              {/* Right: Tabular Amount + Unboxed Status Text */}
+              {/* Right: Tabular Amount + Server Status Pill */}
               <button
                 type="button"
                 onClick={() => (selectionMode ? handleToggleSelect(item.id) : openPaymentModal(item))}
-                className="text-right shrink-0 flex flex-col items-end gap-0.5 focus:outline-none"
+                className="text-right shrink-0 flex flex-col items-end gap-1 focus:outline-none"
               >
                 {isAlert ? (
                   <span className="text-xs font-semibold text-slate-600">Bank Notice</span>
@@ -1127,9 +1287,17 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                   </div>
                 )}
 
-                <span className={`text-[11px] font-semibold whitespace-nowrap ${statusMeta.colorClass}`}>
-                  {statusMeta.label}
+                <span
+                  className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10.5px] font-semibold whitespace-nowrap ${pillMeta.pillClass}`}
+                >
+                  {pillMeta.label}
                 </span>
+
+                {pillMeta.sub && (
+                  <span className="text-[10.5px] font-mono text-slate-500 whitespace-nowrap max-w-[160px] truncate">
+                    {pillMeta.sub}
+                  </span>
+                )}
 
                 {item.balance !== undefined && !settings.hideBalances && !isAlert && (
                   <span className="text-[10.5px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
@@ -1372,6 +1540,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
               </div>
               <button
                 type="button"
+                aria-label="Close transaction details"
                 onClick={() => {
                   setSelectedPayment(null);
                   setModalView('details');
@@ -1406,12 +1575,24 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
 
             {modalView === 'details' ? (
               <>
-                {selectedPayment.serverIgnored && (
+                {selectedPayment.needsReview && (
                   <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
-                    <div className="font-semibold">Server Ignored · Preserved Locally</div>
-                    <p className="text-[11px] mt-0.5 text-amber-800">
-                      {selectedPayment.serverIgnoredReason ||
-                        'Your configured server ignored this SMS format, but Ak Finance parsed and saved all transaction amounts locally.'}
+                    <div className="font-semibold">Needs Review</div>
+                    {selectedPayment.needsReviewReason && (
+                      <p className="text-[11px] mt-0.5 text-amber-800">
+                        {selectedPayment.needsReviewReason}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {(selectedPayment.authError || selectedPayment.syncStatus === 'failed') && selectedPayment.errorMessage && (
+                  <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-900">
+                    <div className="font-semibold">
+                      {selectedPayment.authError ? 'Authentication Error (HTTP 401)' : 'Sync Error'}
+                    </div>
+                    <p className="text-[11px] mt-0.5 text-rose-800">
+                      {selectedPayment.errorMessage}
                     </p>
                   </div>
                 )}
@@ -1440,9 +1621,19 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                           {selectedPayment.amount.toFixed(2)} ETB
                         </div>
                       </div>
-                      <span className={`text-xs font-semibold ${getStatusLabel(selectedPayment).colorClass}`}>
-                        {getStatusLabel(selectedPayment).label}
-                      </span>
+                      <div className="text-right">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md border text-xs font-semibold ${getHuluBetPill(selectedPayment).pillClass}`}
+                        >
+                          {getHuluBetPill(selectedPayment).label}
+                        </span>
+                        {checkingModalStatus && (
+                          <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-end gap-1">
+                            <RefreshCw size={10} className="animate-spin" />
+                            <span>Checking /api/check...</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1472,11 +1663,12 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                         {selectedPayment.reference && (
                           <button
                             type="button"
-                            onClick={() => handleCopy(selectedPayment.reference)}
-                            className="text-slate-400 hover:text-slate-700"
+                            onClick={() => handleCopyRefOnly(selectedPayment.reference)}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
                             aria-label="Copy reference"
                           >
-                            {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
+                            {copiedRef ? <Check size={11} className="text-emerald-600" /> : <Copy size={11} />}
+                            <span>{copiedRef ? 'Copied' : 'Copy Ref'}</span>
                           </button>
                         )}
                         {needsFtRecovery(selectedPayment) && (
@@ -1491,6 +1683,43 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                         )}
                       </div>
                     </div>
+
+                    {/* Show HuluBet server fields ONLY if they exist */}
+                    {selectedPayment.serverResult?.usage && (
+                      <div>
+                        <span className="text-slate-500 block">Server Usage</span>
+                        <span className="font-mono font-semibold text-slate-900">
+                          {selectedPayment.serverResult.usage}
+                        </span>
+                      </div>
+                    )}
+
+                    {selectedPayment.serverResult?.claimed_by && (
+                      <div>
+                        <span className="text-slate-500 block">Claimed By</span>
+                        <span className="font-semibold text-emerald-800">
+                          {selectedPayment.serverResult.claimed_by}
+                        </span>
+                      </div>
+                    )}
+
+                    {selectedPayment.serverResult?.claimed_txn_id && (
+                      <div>
+                        <span className="text-slate-500 block">Claimed Txn ID</span>
+                        <span className="font-mono font-semibold text-slate-900">
+                          {selectedPayment.serverResult.claimed_txn_id}
+                        </span>
+                      </div>
+                    )}
+
+                    {selectedPayment.serverResult?.agent && (
+                      <div>
+                        <span className="text-slate-500 block">Phone / Agent</span>
+                        <span className="font-semibold text-slate-900">
+                          {selectedPayment.serverResult.agent}
+                        </span>
+                      </div>
+                    )}
 
                     {selectedPayment.fee !== undefined && (
                       <div>
@@ -1563,6 +1792,25 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                     <span>Hide</span>
                   </button>
                 </div>
+
+                {onCheckTransactionStatus && selectedPayment.reference && !selectedPayment.reference.startsWith('SMS-') && serverUrlConfigured && (
+                  <button
+                    type="button"
+                    disabled={checkingModalStatus}
+                    onClick={async () => {
+                      setCheckingModalStatus(true);
+                      try {
+                        await onCheckTransactionStatus(selectedPayment);
+                      } finally {
+                        setCheckingModalStatus(false);
+                      }
+                    }}
+                    className="w-full min-h-[38px] py-2 rounded-xl border border-emerald-200 bg-emerald-50/70 text-[#0F4C3A] text-xs font-semibold hover:bg-emerald-100 flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={checkingModalStatus ? 'animate-spin' : ''} />
+                    <span>{checkingModalStatus ? 'Checking /api/check...' : 'Re-check Live Server Status (/api/check)'}</span>
+                  </button>
+                )}
 
                 {onAiParsePayment && settings.aiEnabled !== false && (
                   <button
@@ -1684,7 +1932,7 @@ export const PaymentsList: React.FC<PaymentsListProps> = ({
                       </div>
                     </div>
                     <span className="text-xs font-mono text-emerald-200">
-                      {getStatusLabel(selectedPayment).label}
+                      {getHuluBetPill(selectedPayment).label}
                     </span>
                   </div>
 

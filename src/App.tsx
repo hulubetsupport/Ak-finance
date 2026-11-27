@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from './services/db.ts';
 import { PaymentRecord, Account, WithdrawalRecord, AppSettings, TimeRange, MonthlyBudget } from './types/index.ts';
 import { filterPaymentsByTimeRange } from './utils/timeRange.ts';
+import { computeHuluBetOverviewStats } from './utils/hulubetSync.ts';
 import { translations } from './utils/i18n.ts';
 import { Header } from './components/Header.tsx';
 import { AccountsCardStack } from './components/AccountsCardStack.tsx';
@@ -39,7 +40,6 @@ import {
   Settings,
   Lock,
   Info,
-  AlertTriangle,
   CloudUpload,
   RefreshCw,
 } from 'lucide-react';
@@ -77,6 +77,7 @@ export default function App() {
   const [showVerifyModal, setShowVerifyModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [refreshingServerStatus, setRefreshingServerStatus] = useState(false);
 
   const [timeRange, setTimeRange] = useState<TimeRange>(() => {
     try {
@@ -144,10 +145,48 @@ export default function App() {
       }
     };
 
+    const handleOnline = async () => {
+      await db.processOfflineRetryQueue(true);
+      await db.refreshRecentFromHuluBet();
+      loadData();
+    };
+
     window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
     return () => {
       clearInterval(interval);
       window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [loadData]);
+
+  // HuluBet background engine: immediate open recovery + 15s backoff queue flush + 60s /api/recent live poll
+  useEffect(() => {
+    const runStartupSync = async () => {
+      await db.processOfflineRetryQueue(true);
+      await db.refreshRecentFromHuluBet();
+      await loadData();
+    };
+    runStartupSync();
+
+    const retryTimer = setInterval(async () => {
+      const res = await db.processOfflineRetryQueue(false);
+      if (res.synced > 0 || res.failed > 0) {
+        loadData();
+      }
+    }, 15_000);
+
+    const recentPollTimer = setInterval(async () => {
+      if (document.visibilityState !== 'visible') return;
+      const res = await db.refreshRecentFromHuluBet();
+      if (res.ok && res.updatedCount > 0) {
+        loadData();
+      }
+    }, 60_000);
+
+    return () => {
+      clearInterval(retryTimer);
+      clearInterval(recentPollTimer);
     };
   }, [loadData]);
 
@@ -178,13 +217,10 @@ export default function App() {
     currentTab,
   ]);
 
-  const serverIgnoredCount = useMemo(
-    () => payments.filter(p => p.serverIgnored || p.serverResult?.status === 'Ignored').length,
-    [payments]
-  );
+  const hulubetStats = useMemo(() => computeHuluBetOverviewStats(payments), [payments]);
 
   const localUnsyncedCount = useMemo(
-    () => payments.filter(p => (p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed') && !p.serverIgnored).length,
+    () => payments.filter(p => p.syncStatus === 'local' || p.syncStatus === 'pending' || p.syncStatus === 'failed').length,
     [payments]
   );
 
@@ -220,7 +256,7 @@ export default function App() {
 
   const t = translations[settings.language];
   const serverUrlConfigured = Boolean(settings.serverUrl && settings.serverUrl.trim().length > 0);
-  const attentionCount = serverIgnoredCount + payments.filter(p => p.syncStatus === 'failed').length;
+  const attentionCount = hulubetStats.syncErrorsCount + hulubetStats.needsReviewCount;
 
   const pageTitleMap: Record<TabId, string> = {
     home: settings.language === 'am' ? 'አጠቃላይ እይታ' : 'Overview',
@@ -274,20 +310,55 @@ export default function App() {
     return res;
   };
 
+  const handleRefreshServerStatus = async () => {
+    setRefreshingServerStatus(true);
+    try {
+      await db.processOfflineRetryQueue(true);
+      const res = await db.refreshRecentFromHuluBet();
+      if (!res.ok) {
+        setSyncNotice(res.error || 'Could not refresh HuluBet server status.');
+      } else {
+        setSyncNotice(`HuluBet status refreshed (${res.totalFetched} recent, ${res.updatedCount} matched).`);
+      }
+      setTimeout(() => setSyncNotice(null), 4000);
+      await loadData();
+    } finally {
+      setRefreshingServerStatus(false);
+    }
+  };
+
+  const handleCheckTransactionStatus = async (payment: PaymentRecord) => {
+    const res = await db.checkTransactionStatus(payment.id, payment.reference);
+    await loadData();
+    if (!res.ok && res.error) {
+      setSyncNotice(res.error);
+      setTimeout(() => setSyncNotice(null), 4000);
+    }
+    return res;
+  };
+
   const handleSyncSelected = async (ids: string[]) => {
     let synced = 0;
-    let ignored = 0;
+    let needsReview = 0;
     let failed = 0;
     for (const id of ids) {
       const res = await db.syncPaymentToServer(id);
       if (res.ok) {
-        if (res.status === 'Ignored') ignored++;
+        if (res.needsReview) needsReview++;
         else synced++;
       } else {
         failed++;
+        if (res.authError) {
+          setSyncNotice(res.message);
+          setTimeout(() => setSyncNotice(null), 5000);
+          await loadData();
+          return;
+        }
       }
     }
-    setSyncNotice(`Batch sync complete: ${synced} saved, ${ignored} server ignored, ${failed} failed.`);
+    setSyncNotice(
+      `Sync complete: ${synced} synced${needsReview ? `, ${needsReview} needs review` : ''}${failed ? `, ${failed} queued for retry` : ''}.`
+    );
     setTimeout(() => setSyncNotice(null), 5000);
     await loadData();
   };
@@ -297,7 +368,9 @@ export default function App() {
     if (res.error) {
       setSyncNotice(res.error);
     } else {
-      setSyncNotice(`Synced ${res.synced} · Server Ignored ${res.ignored} · Failed ${res.failed}`);
+      setSyncNotice(
+        `Synced ${res.synced}${res.needsReview ? ` · Needs review ${res.needsReview}` : ''}${res.failed ? ` · Queued/Retry ${res.failed}` : ''}`
+      );
     }
     setTimeout(() => setSyncNotice(null), 5000);
     await loadData();
@@ -469,10 +542,13 @@ export default function App() {
 
         <div className="p-3 border-t border-slate-200 text-xs text-slate-600">
           <div className="font-semibold text-slate-900">
-            {settings.mode === 'local' ? 'Standalone Local Mode' : 'Server Sync Mode'}
+            {settings.mode === 'local'
+              ? 'Standalone Local Mode'
+              : `HuluBet · ${settings.deviceLabel || (settings.deviceRole === 'agent' ? 'Agent 1' : 'Owner')}`}
           </div>
-          <div className="text-[11px] text-slate-500 mt-0.5">
-            {payments.length} stored · {serverIgnoredCount} server ignored
+          <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+            {payments.length} stored
+            {hulubetStats.syncErrorsCount > 0 ? ` · ${hulubetStats.syncErrorsCount} sync error` : ''}
           </div>
         </div>
       </aside>
@@ -536,49 +612,114 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Conditional Action Strip for Server Ignored / Unsynced Local Records */}
-              {(serverIgnoredCount > 0 || localUnsyncedCount > 0) && (
-                <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 text-slate-700">
-                    <AlertTriangle size={15} className="text-amber-600 shrink-0" />
-                    <span>
-                      {localUnsyncedCount > 0
-                        ? `${localUnsyncedCount} local unsent transaction${localUnsyncedCount > 1 ? 's' : ''} saved on device (select specific rows to sync).`
-                        : `${serverIgnoredCount} transaction${serverIgnoredCount > 1 ? 's' : ''} ignored by server webhook (parsed & preserved locally).`}
-                    </span>
+              {/* HuluBet Overview Live Counters & Quick Balances */}
+              <section
+                aria-label="HuluBet Verification Counters"
+                className="bg-white border border-slate-200 rounded-xl p-4 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-xs font-bold uppercase tracking-wider text-slate-700">
+                      HuluBet Verify Overview · {settings.deviceLabel || 'Owner'}
+                    </h2>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {localUnsyncedCount > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {hulubetStats.syncErrorsCount > 0 && (
                       <button
                         type="button"
-                        onClick={() => openLedgerFiltered('local')}
-                        className="px-3 py-1.5 rounded-lg border border-[#0F4C3A] bg-emerald-50 text-[#0F4C3A] font-semibold whitespace-nowrap"
+                        onClick={() => openLedgerFiltered('sync-error')}
+                        className="px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-xs font-semibold whitespace-nowrap"
                       >
-                        Review Local Only ({localUnsyncedCount})
-                      </button>
-                    )}
-                    {serverIgnoredCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => openLedgerFiltered('server-ignored')}
-                        className="px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 font-semibold whitespace-nowrap"
-                      >
-                        Review Server Ignored ({serverIgnoredCount})
+                        Sync Errors ({hulubetStats.syncErrorsCount})
                       </button>
                     )}
                     {localUnsyncedCount > 0 && serverUrlConfigured && (
                       <button
                         type="button"
                         onClick={handleBulkSync}
-                        className="px-3 py-1.5 rounded-lg bg-[#0F4C3A] text-white font-semibold flex items-center gap-1.5 whitespace-nowrap"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#0F4C3A] text-white text-xs font-semibold flex items-center gap-1 whitespace-nowrap"
                       >
-                        <CloudUpload size={13} />
-                        <span>Sync Local to Server</span>
+                        <CloudUpload size={12} />
+                        <span>Sync Local ({localUnsyncedCount})</span>
                       </button>
                     )}
+                    <button
+                      type="button"
+                      disabled={refreshingServerStatus}
+                      onClick={handleRefreshServerStatus}
+                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-emerald-50 text-[#0F4C3A] text-xs font-semibold flex items-center gap-1 whitespace-nowrap disabled:opacity-50"
+                    >
+                      <RefreshCw size={12} className={refreshingServerStatus ? 'animate-spin' : ''} />
+                      <span>{refreshingServerStatus ? 'Refreshing...' : 'Refresh'}</span>
+                    </button>
                   </div>
                 </div>
-              )}
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                    <div className="text-[11px] font-medium text-slate-500">Deposits Claimed</div>
+                    <div className="font-mono text-sm font-bold text-emerald-700 tabular-nums mt-0.5">
+                      {settings.hideBalances
+                        ? '••••••'
+                        : `${hulubetStats.depositsClaimedEtb.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB`}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                    <div className="text-[11px] font-medium text-slate-500">Withdrawals Verified</div>
+                    <div className="font-mono text-sm font-bold text-slate-900 tabular-nums mt-0.5">
+                      {settings.hideBalances
+                        ? '••••••'
+                        : `${hulubetStats.withdrawalsVerifiedEtb.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB`}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                    <div className="text-[11px] font-medium text-slate-500">Pending / Unclaimed</div>
+                    <div className="font-mono text-sm font-bold text-amber-800 tabular-nums mt-0.5">
+                      {hulubetStats.pendingUnclaimedCount}{' '}
+                      <span className="text-[11px] font-normal text-slate-500">
+                        {settings.hideBalances
+                          ? ''
+                          : `(${hulubetStats.pendingUnclaimedEtb.toLocaleString('en-US', { maximumFractionDigits: 0 })} ETB)`}
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => openLedgerFiltered('needs-review')}
+                    className="rounded-lg border border-slate-200 bg-slate-50/70 hover:bg-amber-50 p-2.5 text-left transition-colors"
+                  >
+                    <div className="text-[11px] font-medium text-slate-500">Needs Review</div>
+                    <div className={`font-mono text-sm font-bold tabular-nums mt-0.5 ${hulubetStats.needsReviewCount > 0 ? 'text-amber-700' : 'text-slate-900'}`}>
+                      {hulubetStats.needsReviewCount}
+                    </div>
+                  </button>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                    <div className="text-[11px] font-medium text-slate-500">Latest Telebirr Bal</div>
+                    <div className="font-mono text-sm font-bold text-sky-800 tabular-nums mt-0.5">
+                      {settings.hideBalances
+                        ? '••••••'
+                        : hulubetStats.latestTelebirrBalance !== null
+                          ? `${hulubetStats.latestTelebirrBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB`
+                          : '—'}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                    <div className="text-[11px] font-medium text-slate-500">Latest CBE Balance</div>
+                    <div className="font-mono text-sm font-bold text-purple-900 tabular-nums mt-0.5">
+                      {settings.hideBalances
+                        ? '••••••'
+                        : hulubetStats.latestCbeBalance !== null
+                          ? `${hulubetStats.latestCbeBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB`
+                          : '—'}
+                    </div>
+                  </div>
+                </div>
+              </section>
 
               <PaymentsList
                 payments={displayedPayments}
@@ -591,6 +732,9 @@ export default function App() {
                 onSyncPayment={handleSyncPayment}
                 onSyncSelected={handleSyncSelected}
                 onAiParsePayment={handleAiParsePayment}
+                onRefreshServerStatus={handleRefreshServerStatus}
+                refreshingServerStatus={refreshingServerStatus}
+                onCheckTransactionStatus={handleCheckTransactionStatus}
                 serverUrlConfigured={serverUrlConfigured}
                 onOpenSettings={() => setShowSettingsModal(true)}
                 maxItems={8}
@@ -713,6 +857,9 @@ export default function App() {
                     onSyncPayment={handleSyncPayment}
                     onSyncSelected={handleSyncSelected}
                     onAiParsePayment={handleAiParsePayment}
+                    onRefreshServerStatus={handleRefreshServerStatus}
+                    refreshingServerStatus={refreshingServerStatus}
+                    onCheckTransactionStatus={handleCheckTransactionStatus}
                     serverUrlConfigured={serverUrlConfigured}
                     initialStatusFilter={ledgerStatusFilter}
                     onOpenSettings={() => setShowSettingsModal(true)}

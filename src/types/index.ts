@@ -27,6 +27,14 @@ export interface ServerResultRecord {
   bank?: string;
   type?: string;
   amount?: number;
+  balance?: number;
+  agent?: string;
+  usage?: 'Unused' | 'Used' | 'Sent_Locked' | 'Payout_Verified';
+  claimed_by?: string;
+  claimed_txn_id?: string;
+  needsReview?: boolean;
+  needsReviewReason?: string;
+  lastCheckedAt?: number;
 }
 
 export type BankName =
@@ -80,6 +88,10 @@ export interface PaymentRecord {
   syncStatus: SyncStatus;
   serverIgnored?: boolean;
   serverIgnoredReason?: string;
+  needsReview?: boolean;
+  needsReviewReason?: string;
+  authError?: boolean;
+  nextRetryAt?: number;
   retryCount: number;
   lastRetryAt?: number;
   errorMessage?: string;
@@ -172,6 +184,7 @@ export type AppMode = 'server' | 'local';
 export type HttpMethod = 'POST' | 'GET';
 export type Language = 'en' | 'am';
 export type AiModelId = AiChatModelId;
+export type DeviceRoleType = 'owner' | 'agent';
 
 export interface AppSettings {
   serverUrl: string;
@@ -179,6 +192,12 @@ export interface AppSettings {
   httpMethod: HttpMethod;
   retryIntervalSeconds: number;
   mode: AppMode;
+  deviceRole?: DeviceRoleType;
+  deviceLabel?: string;
+  roleTokens?: {
+    owner?: string;
+    agent?: string;
+  };
   allowedSenders: string[];
   language: Language;
   hideBalances: boolean;

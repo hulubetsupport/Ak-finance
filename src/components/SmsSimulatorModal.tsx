@@ -293,6 +293,13 @@ export const SmsSimulatorModal: React.FC<SmsSimulatorModalProps> = ({
           </div>
         )}
 
+        {settings.mode === 'server' && settings.serverUrl?.trim() && (
+          <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-900">
+            <span className="font-semibold">HuluBet Server Sync active ({settings.deviceLabel || 'Owner'}):</span>{' '}
+            Telebirr (127) and CBE SMS will forward automatically to <span className="font-mono">/webhook/sms</span> with offline retry protection.
+          </div>
+        )}
+
         {/* Submit Button */}
         <button
           type="button"

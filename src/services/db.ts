@@ -34,6 +34,7 @@ import {
   normalizeHuluBetServerRecord,
   extractRecentArrayFromPayload,
   normalizeRefKey,
+  isInvalidHealthcheckSyncResult,
   HuluBetNormalizedRecord,
 } from '../utils/hulubetSync.ts';
 import {
@@ -435,6 +436,12 @@ class DatabaseService {
       if (ov?.category) category = ov.category as PaymentCategory;
       const note = ov?.note || undefined;
 
+      let fakeRootSyncError: string | undefined;
+      if (isInvalidHealthcheckSyncResult(msg.status, serverResultObj)) {
+        status = 'failed';
+        fakeRootSyncError = 'Hit server / healthcheck instead of /webhook/sms. Tap Sync to resend.';
+      }
+
       // Saved or Duplicate are ALWAYS Synced (never ignored/failed).
       // Only explicit Ignored responses with Missing Ref / Missing Amount trigger "Needs review".
       const needsReview = Boolean(serverResultObj?.needsReview);
@@ -501,7 +508,7 @@ class DatabaseService {
         authError: Boolean(msg.authError),
         nextRetryAt: msg.nextRetryAt,
         retryCount: msg.tries || 0,
-        errorMessage: msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : undefined),
+        errorMessage: fakeRootSyncError || msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : undefined),
         serverResponse: msg.code ? `HTTP ${msg.code}` : undefined,
         serverResult: serverResultObj,
         source: 'sms',
@@ -700,12 +707,20 @@ class DatabaseService {
     let synced = 0;
     let failed = 0;
     try {
-      const [messages, senderMap] = await Promise.all([getNativeMessages(), getNativeSenderBankMap()]);
+      const [messages, senderMap, serverResults] = await Promise.all([
+        getNativeMessages(),
+        getNativeSenderBankMap(),
+        getNativeServerResults(),
+      ]);
       const now = Date.now();
       for (const msg of messages) {
         if (msg.authError) continue;
-        if (msg.status !== 'pending' && msg.status !== 'failed') continue;
-        if (!force && !isQueueItemDueForRetry(msg, now)) continue;
+        const sr = serverResults[String(msg.id)];
+        const isFakeRootSync = isInvalidHealthcheckSyncResult(msg.status, sr);
+        if (!isFakeRootSync) {
+          if (msg.status !== 'pending' && msg.status !== 'failed') continue;
+          if (!force && !isQueueItemDueForRetry(msg, now)) continue;
+        }
         if (!isTelebirrOrCbeSms(msg.sender, msg.body, senderMap) && msg.status !== 'pending') continue;
 
         retried++;

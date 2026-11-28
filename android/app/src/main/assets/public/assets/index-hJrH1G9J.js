@@ -13434,6 +13434,21 @@ function normalizeUsageStatus(raw) {
 	if (v === "payout_verified" || v === "verified") return "Payout_Verified";
 }
 /**
+* Detect rows that accidentally hit `GET /` (healthcheck `{"status":"ok"}`) instead of `/webhook/sms`.
+* Older native background sync called base URL without appending `/webhook/sms` and treated HTTP 200 as `sent`.
+*/
+function isInvalidHealthcheckSyncResult(msgStatus, serverResult) {
+	if (msgStatus !== "sent" || !serverResult) return false;
+	const raw = (serverResult.raw || "").trim();
+	const st = (serverResult.status || "").trim().toLowerCase();
+	if (raw === "{\"status\":\"ok\"}" || raw === "{\"status\": \"ok\"}") return true;
+	if ((st === "ok" || st === "unknown") && !serverResult.ref && !serverResult.bank && !serverResult.usage) try {
+		const parsed = raw ? JSON.parse(raw) : null;
+		if (parsed && String(parsed.status || "").toLowerCase() === "ok" && !parsed.bank && !parsed.ref) return true;
+	} catch {}
+	return false;
+}
+/**
 * Sanitize optional HuluBet server record payload: preserve non-empty fields only.
 */
 function normalizeHuluBetServerRecord(raw) {
@@ -14579,6 +14594,11 @@ var DatabaseService = class {
 			if (ov?.direction) type = ov.direction;
 			if (ov?.category) category = ov.category;
 			const note = ov?.note || void 0;
+			let fakeRootSyncError;
+			if (isInvalidHealthcheckSyncResult(msg.status, serverResultObj)) {
+				status = "failed";
+				fakeRootSyncError = "Hit server / healthcheck instead of /webhook/sms. Tap Sync to resend.";
+			}
 			const needsReview = Boolean(serverResultObj?.needsReview);
 			const needsReviewReason = needsReview ? serverResultObj?.needsReviewReason || serverResultObj?.reason : void 0;
 			const serverIgnored = false;
@@ -14630,7 +14650,7 @@ var DatabaseService = class {
 				authError: Boolean(msg.authError),
 				nextRetryAt: msg.nextRetryAt,
 				retryCount: msg.tries || 0,
-				errorMessage: msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : void 0),
+				errorMessage: fakeRootSyncError || msg.err || (msg.code && msg.code !== 200 ? `HTTP ${msg.code}` : void 0),
 				serverResponse: msg.code ? `HTTP ${msg.code}` : void 0,
 				serverResult: serverResultObj,
 				source: "sms",
@@ -14820,12 +14840,19 @@ var DatabaseService = class {
 		let synced = 0;
 		let failed = 0;
 		try {
-			const [messages, senderMap] = await Promise.all([getNativeMessages(), getNativeSenderBankMap()]);
+			const [messages, senderMap, serverResults] = await Promise.all([
+				getNativeMessages(),
+				getNativeSenderBankMap(),
+				getNativeServerResults()
+			]);
 			const now = Date.now();
 			for (const msg of messages) {
 				if (msg.authError) continue;
-				if (msg.status !== "pending" && msg.status !== "failed") continue;
-				if (!force && !isQueueItemDueForRetry(msg, now)) continue;
+				const sr = serverResults[String(msg.id)];
+				if (!isInvalidHealthcheckSyncResult(msg.status, sr)) {
+					if (msg.status !== "pending" && msg.status !== "failed") continue;
+					if (!force && !isQueueItemDueForRetry(msg, now)) continue;
+				}
 				if (!isTelebirrOrCbeSms(msg.sender, msg.body, senderMap) && msg.status !== "pending") continue;
 				retried++;
 				const res = await this.syncPaymentToServer(String(msg.id));
@@ -26077,12 +26104,29 @@ var LocalVerifyModal = ({ isOpen, onClose, payments, settings }) => {
 		setServerCheckError(null);
 		setServerCheckResult(null);
 		try {
-			let baseUrl = serverUrl;
-			try {
-				const u = new URL(serverUrl);
-				baseUrl = `${u.protocol}//${u.host}`;
+			const checkUrl = `${resolveHuluBetEndpointUrl(serverUrl, "/api/check")}?token=${encodeURIComponent(token.trim())}&ref=${encodeURIComponent(searchRef)}&live=1`;
+			let rawText = "";
+			if (Capacitor.isNativePlatform()) try {
+				const capRes = await CapacitorHttp.get({
+					url: checkUrl,
+					headers: { Accept: "application/json" },
+					connectTimeout: 1e4,
+					readTimeout: 1e4
+				});
+				if (typeof capRes.data === "string") rawText = capRes.data;
+				else if (capRes.data !== void 0 && capRes.data !== null) {
+					setServerCheckResult(capRes.data);
+					return;
+				}
 			} catch {}
-			const checkUrl = `${baseUrl.replace(/\/+$/, "")}/api/check?token=${encodeURIComponent(token)}&ref=${encodeURIComponent(searchRef)}&live=1`;
+			if (rawText) {
+				try {
+					setServerCheckResult(JSON.parse(rawText));
+				} catch {
+					setServerCheckResult({ rawText });
+				}
+				return;
+			}
 			const response = await fetch(checkUrl, {
 				method: "GET",
 				headers: { Accept: "application/json" }

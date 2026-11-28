@@ -235,6 +235,29 @@ export function normalizeUsageStatus(raw?: unknown): HuluBetUsageStatus | undefi
 }
 
 /**
+ * Detect rows that accidentally hit `GET /` (healthcheck `{"status":"ok"}`) instead of `/webhook/sms`.
+ * Older native background sync called base URL without appending `/webhook/sms` and treated HTTP 200 as `sent`.
+ */
+export function isInvalidHealthcheckSyncResult(
+  msgStatus?: string | null,
+  serverResult?: { status?: string; raw?: string; ref?: string; bank?: string; usage?: string } | null
+): boolean {
+  if (msgStatus !== 'sent' || !serverResult) return false;
+  const raw = (serverResult.raw || '').trim();
+  const st = (serverResult.status || '').trim().toLowerCase();
+  if (raw === '{"status":"ok"}' || raw === '{"status": "ok"}') return true;
+  if ((st === 'ok' || st === 'unknown') && !serverResult.ref && !serverResult.bank && !serverResult.usage) {
+    try {
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && String(parsed.status || '').toLowerCase() === 'ok' && !parsed.bank && !parsed.ref) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+/**
  * Sanitize optional HuluBet server record payload: preserve non-empty fields only.
  */
 export function normalizeHuluBetServerRecord(raw: unknown): HuluBetNormalizedRecord | null {

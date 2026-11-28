@@ -13,8 +13,10 @@ import {
   ExternalLink,
   ReceiptText,
 } from 'lucide-react';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { PaymentRecord, AppSettings } from '../types/index.ts';
 import { parseBankSms, buildOfficialReceiptUrl } from '../utils/smsParser.ts';
+import { resolveHuluBetEndpointUrl } from '../utils/hulubetSync.ts';
 
 interface LocalVerifyModalProps {
   isOpen: boolean;
@@ -170,13 +172,36 @@ export const LocalVerifyModal: React.FC<LocalVerifyModalProps> = ({
     setServerCheckResult(null);
 
     try {
-      let baseUrl = serverUrl;
-      try {
-        const u = new URL(serverUrl);
-        baseUrl = `${u.protocol}//${u.host}`;
-      } catch {}
+      const endpoint = resolveHuluBetEndpointUrl(serverUrl, '/api/check');
+      const checkUrl = `${endpoint}?token=${encodeURIComponent(token.trim())}&ref=${encodeURIComponent(searchRef)}&live=1`;
 
-      const checkUrl = `${baseUrl.replace(/\/+$/, '')}/api/check?token=${encodeURIComponent(token)}&ref=${encodeURIComponent(searchRef)}&live=1`;
+      let rawText = '';
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const capRes = await CapacitorHttp.get({
+            url: checkUrl,
+            headers: { Accept: 'application/json' },
+            connectTimeout: 10000,
+            readTimeout: 10000,
+          });
+          if (typeof capRes.data === 'string') {
+            rawText = capRes.data;
+          } else if (capRes.data !== undefined && capRes.data !== null) {
+            setServerCheckResult(capRes.data);
+            return;
+          }
+        } catch {}
+      }
+
+      if (rawText) {
+        try {
+          setServerCheckResult(JSON.parse(rawText));
+        } catch {
+          setServerCheckResult({ rawText });
+        }
+        return;
+      }
+
       const response = await fetch(checkUrl, { method: 'GET', headers: { Accept: 'application/json' } });
       const text = await response.text();
       try {

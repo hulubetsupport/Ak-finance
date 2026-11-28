@@ -79,28 +79,33 @@ public class Sync {
         }
     }
 
+    public static String resolveWebhookUrl(String rawUrl) {
+        String clean = rawUrl != null ? rawUrl.trim() : "";
+        if (clean.isEmpty()) return "";
+        int qIdx = clean.indexOf('?');
+        if (qIdx >= 0) clean = clean.substring(0, qIdx);
+        int hIdx = clean.indexOf('#');
+        if (hIdx >= 0) clean = clean.substring(0, hIdx);
+        clean = clean.replaceAll("/+$", "");
+        clean = clean.replaceAll("(?i)/(webhook/sms|api/recent|api/check|api/verify)$", "");
+        clean = clean.replaceAll("/+$", "");
+        return clean + "/webhook/sms";
+    }
+
     public static SendResult send(SharedPreferences sp, String sender, String body) throws Exception {
-        String url = sp.getString("url", "").trim();
+        String url = resolveWebhookUrl(sp.getString("url", ""));
         if (url.isEmpty()) throw new IllegalStateException("Server URL not configured");
-        String qs = "action=save_sms&token=" + enc(sp.getString("token", "")) + "&sender=" + enc(sender) + "&message=" + enc(body);
-        boolean post = "POST".equalsIgnoreCase(sp.getString("method", "GET"));
-        HttpURLConnection h = (HttpURLConnection) new URL(post ? url : url + (url.contains("?") ? "&" : "?") + qs).openConnection();
-        h.setConnectTimeout(30000);
-        h.setReadTimeout(60000);
-        if (post) {
-            h.setRequestMethod("POST");
-            h.setDoOutput(true);
-            h.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            OutputStream o = h.getOutputStream();
-            o.write(qs.getBytes("UTF-8"));
-            o.close();
-        }
+        String qs = "token=" + enc(sp.getString("token", "").trim()) + "&sender=" + enc(sender) + "&message=" + enc(body);
+        HttpURLConnection h = (HttpURLConnection) new URL(url + (url.contains("?") ? "&" : "?") + qs).openConnection();
+        h.setRequestMethod("GET");
+        h.setConnectTimeout(15000);
+        h.setReadTimeout(30000);
         int code = h.getResponseCode();
         String respBody = "";
         try {
             InputStream is = (code >= 200 && code < 400) ? h.getInputStream() : h.getErrorStream();
             if (is != null) {
-                byte[] buf = new byte[1024]; // max 1 KB
+                byte[] buf = new byte[2048];
                 int len = is.read(buf);
                 if (len > 0) {
                     respBody = new String(buf, 0, len, "UTF-8");
@@ -130,12 +135,32 @@ public class Sync {
                 String err = null;
                 int code = 0;
                 String respBody = "";
+                String status = "Unknown";
+                String ref = "";
+                String reason = "";
                 try {
                     SendResult res = send(sp, (String) r[1], (String) r[2]);
                     code = res.code;
                     respBody = res.body;
-                    if (code == 200) {
+                    if (!respBody.isEmpty()) {
+                        try {
+                            JSONObject j = new JSONObject(respBody);
+                            if (j.has("status")) status = j.getString("status");
+                            if (j.has("ref") && !j.isNull("ref")) ref = j.getString("ref");
+                            if (j.has("reason") && !j.isNull("reason")) reason = j.getString("reason");
+                        } catch (Exception ignored) {
+                            status = "Unknown";
+                        }
+                    }
+                    boolean isAcceptedWebhookStatus = "Saved".equalsIgnoreCase(status)
+                            || "Duplicate".equalsIgnoreCase(status)
+                            || "Ignored".equalsIgnoreCase(status);
+                    if (code >= 200 && code < 300 && isAcceptedWebhookStatus) {
                         st = "sent";
+                    } else if (code == 401) {
+                        err = "Wrong token (HTTP 401)";
+                    } else if (code >= 200 && code < 300) {
+                        err = "Unexpected webhook reply (" + status + ") instead of Saved/Duplicate/Ignored";
                     } else {
                         err = "HTTP " + code;
                     }
@@ -146,21 +171,7 @@ public class Sync {
                         new Object[]{st, err, code, r[0]});
                 sp.edit().putInt("lastCode", code).putLong("lastCodeAt", System.currentTimeMillis()).apply();
 
-                // Store in server_result table (Part B)
                 try {
-                    String status = "Unknown";
-                    String ref = "";
-                    String reason = "";
-                    if (!respBody.isEmpty()) {
-                        try {
-                            JSONObject j = new JSONObject(respBody);
-                            if (j.has("status")) status = j.getString("status");
-                            if (j.has("ref")) ref = j.getString("ref");
-                            if (j.has("reason")) reason = j.getString("reason");
-                        } catch (Exception ignored) {
-                            status = "Unknown";
-                        }
-                    }
                     db.execSQL("INSERT OR REPLACE INTO server_result (sms_id, http_code, status, ref, reason, raw, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             new Object[]{r[0], code, status, ref, reason, respBody, System.currentTimeMillis()});
                 } catch (Exception ignored) {}

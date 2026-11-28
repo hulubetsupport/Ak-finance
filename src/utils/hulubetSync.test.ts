@@ -10,6 +10,7 @@ import {
   normalizeHuluBetServerRecord,
   extractRecentArrayFromPayload,
   computeHuluBetOverviewStats,
+  isInvalidHealthcheckSyncResult,
 } from './hulubetSync.ts';
 import type { PaymentRecord } from '../types/index.ts';
 
@@ -230,4 +231,31 @@ test('computeHuluBetOverviewStats aggregates claimed deposits, verified withdraw
   assert.equal(stats.syncErrorsCount, 1);
   assert.equal(stats.latestTelebirrBalance, 4500);
   assert.equal(stats.latestCbeBalance, 19200);
+});
+
+test('isInvalidHealthcheckSyncResult flags sent rows whose server reply was root {"status":"ok"}', () => {
+  assert.equal(
+    isInvalidHealthcheckSyncResult('sent', { status: 'Unknown', raw: '{"status":"ok"}' }),
+    true
+  );
+  assert.equal(
+    isInvalidHealthcheckSyncResult('sent', { status: 'ok', raw: '{"status": "ok"}' }),
+    true
+  );
+  assert.equal(
+    isInvalidHealthcheckSyncResult('sent', {
+      status: 'Saved',
+      ref: 'DKS1RXM2ZH',
+      bank: 'Telebirr',
+      raw: '{"status":"Saved","bank":"Telebirr","ref":"DKS1RXM2ZH"}',
+    }),
+    false
+  );
+  assert.equal(
+    isInvalidHealthcheckSyncResult('sent', {
+      status: 'Ignored',
+      raw: '{"status":"Ignored","reason":"Not a payment SMS"}',
+    }),
+    false
+  );
 });
